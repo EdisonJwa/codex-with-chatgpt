@@ -128,22 +128,29 @@ export function resolveTunnelProvider(
  * ordering — reconciliation BEFORE generic reachability — is unit-testable:
  * a healthy old tunnel must stay red when the effective machine config
  * differs, and `fix` turns that red into a restart (re-evaluated after).
+ *
+ * `loginRepair` is true ONLY for a down per-workspace provisioned named
+ * tunnel, where `cloudflared tunnel login` is the actual repair. Machine
+ * mode (explicit credentials file) never routes into the login flow.
  */
 export interface DoctorTunnelDecision {
   red: boolean;
   restart: boolean;
   detail?: string;
+  loginRepair: boolean;
 }
 
 export function doctorTunnelDecision(opts: {
   effective: EffectiveTunnelState;
   running: RunningTunnelInfo | null;
+  /** The running public URL is unreachable (or absent). */
+  down: boolean;
   fix: boolean;
   namedReady: boolean;
 }): DoctorTunnelDecision {
-  const { effective, running, fix, namedReady } = opts;
+  const { effective, running, down, fix, namedReady } = opts;
   if (effective.source === "machine" && effective.error) {
-    return { red: true, restart: false, detail: effective.error };
+    return { red: true, restart: false, detail: effective.error, loginRepair: false };
   }
   if (effective.source === "machine" && effective.machine) {
     const evaluation = running
@@ -152,18 +159,35 @@ export function doctorTunnelDecision(opts: {
     if (!evaluation.ok) {
       // With --fix a restart resolves it; without --fix it stays red.
       return {
-        red: !(fix && evaluation.restart),
+        red: true,
         restart: Boolean(fix && evaluation.restart),
         detail: evaluation.detail,
+        loginRepair: false,
       };
     }
-    return { red: false, restart: false };
+    if (down) {
+      // Config matches but the connector is down: starting it (or surfacing
+      // the start error) is the repair — Cloudflare login is irrelevant.
+      return {
+        red: true,
+        restart: false,
+        detail: running?.detail ?? `machine tunnel ${effective.machine.hostname} is down`,
+        loginRepair: false,
+      };
+    }
+    return { red: false, restart: false, loginRepair: false };
   }
   if (namedReady) {
-    // per-workspace named mode: down tunnel is red; login repair handled by caller
-    return { red: !running, restart: Boolean(fix && !running), detail: "NAMED_TUNNEL_DOWN" };
+    // Per-workspace provisioned named mode: a down tunnel IS repaired by a
+    // Cloudflare login (cert.pem may be missing or stale).
+    return {
+      red: Boolean(down || !running),
+      restart: false,
+      detail: "NAMED_TUNNEL_DOWN",
+      loginRepair: Boolean(down || !running),
+    };
   }
-  return { red: false, restart: false };
+  return { red: false, restart: false, loginRepair: false };
 }
 
 /** The minimal view of a RUNNING bridge needed to reconcile it. */
@@ -172,6 +196,8 @@ export interface RunningTunnelInfo {
   tunnelSource?: string;
   tunnelConfigId?: string;
   url?: string | null;
+  /** The provider's last error, if the connector reported one. */
+  detail?: string;
 }
 
 /**

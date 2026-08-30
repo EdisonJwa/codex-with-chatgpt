@@ -314,21 +314,22 @@ describe("doctor tunnel decision ordering", () => {
       };
       // diagnose-only: reconciliation red must NOT be downgraded by the
       // healthy reachability check
-      const noFix = doctorTunnelDecision({ effective, running: runningA, fix: false, namedReady: true });
+      const noFix = doctorTunnelDecision({ effective, running: runningA, down: false, fix: false, namedReady: true });
       expect(noFix.red).toBe(true);
       expect(noFix.restart).toBe(false);
-      // with --fix: the decision is a restart (not silent green)
+      // with --fix: red until the restart actually happens, then recomputed
       const withFix = doctorTunnelDecision({ effective, running: runningA, fix: true, namedReady: true });
-      expect(withFix.red).toBe(false);
+      expect(withFix.red).toBe(true);
       expect(withFix.restart).toBe(true);
       // after the restart the recomputed decision is green
       const after = doctorTunnelDecision({
         effective,
         running: { ...runningA, tunnelConfigId: effective.machine!.configId },
+        down: false,
         fix: true,
         namedReady: true,
       });
-      expect(after).toEqual({ red: false, restart: false });
+      expect(after).toEqual({ red: false, restart: false, loginRepair: false });
     } finally {
       clearMachineTunnelConfig();
       cleanup(path.join(stateDir, "tunnels"));
@@ -348,6 +349,76 @@ describe("doctor tunnel decision ordering", () => {
       });
       expect(d.red).toBe(true);
       expect(d.restart).toBe(false);
+    } finally {
+      cleanup(path.join(stateDir, "tunnels"));
+    }
+  });
+});
+
+describe("machine vs workspace repair routing", () => {
+  it("a matching but DOWN machine tunnel never routes into Cloudflare login repair", () => {
+    const stateDir = isolateStateDir();
+    try {
+      writeMachineTunnelConfig({
+        mode: "cloudflare-named" as const,
+        publicUrl: "https://c2c.example.com",
+        tunnelName: "Edison-PC",
+        tunnelId: "b42367b0-4892-4dbe-a3c2-279e6de880f4",
+        credentialsFile: credsFile,
+      });
+      const effective = effectiveTunnelState("ws-doc");
+      const running = {
+        provider: "cloudflare-named",
+        tunnelSource: "machine",
+        tunnelConfigId: effective.machine!.configId,
+        url: "https://c2c.example.com",
+        detail: "cloudflared exited (code 1)",
+      };
+      const noFix = doctorTunnelDecision({ effective, running, down: true, fix: false, namedReady: true });
+      expect(noFix.red).toBe(true);
+      expect(noFix.restart).toBe(false);
+      expect(noFix.loginRepair).toBe(false);
+      expect(noFix.detail).toContain("cloudflared exited");
+      const withFix = doctorTunnelDecision({ effective, running, down: true, fix: true, namedReady: true });
+      expect(withFix.red).toBe(true);
+      expect(withFix.restart).toBe(false); // start attempt, not a bridge restart
+      expect(withFix.loginRepair).toBe(false);
+    } finally {
+      clearMachineTunnelConfig();
+      cleanup(path.join(stateDir, "tunnels"));
+    }
+  });
+
+  it("only a down per-workspace named tunnel routes into login repair", () => {
+    const stateDir = isolateStateDir();
+    try {
+      writeTunnelState({
+        workspaceId: "ws-named",
+        preference: "named",
+        askedAt: new Date().toISOString(),
+        tunnelName: "c2c-ws-named",
+        hostname: "c2c-ws.example.com",
+      });
+      const effective = effectiveTunnelState("ws-named");
+      const down = doctorTunnelDecision({
+        effective,
+        running: { provider: "cloudflare-named", tunnelSource: "workspace", url: "https://c2c-ws.example.com" },
+        down: true,
+        fix: false,
+        namedReady: true,
+      });
+      expect(down.red).toBe(true);
+      expect(down.loginRepair).toBe(true);
+
+      const healthy = doctorTunnelDecision({
+        effective,
+        running: { provider: "cloudflare-named", tunnelSource: "workspace", url: "https://c2c-ws.example.com" },
+        down: false,
+        fix: false,
+        namedReady: true,
+      });
+      expect(healthy.red).toBe(false);
+      expect(healthy.loginRepair).toBe(false);
     } finally {
       cleanup(path.join(stateDir, "tunnels"));
     }

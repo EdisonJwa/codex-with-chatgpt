@@ -502,7 +502,7 @@ program
       // Reconciliation decision: for a machine override it takes precedence
       // over generic reachability — a healthy tunnel built from an older
       // config (or serving another address) must not read as green.
-      const decision = (): string => {
+      const decision = (down: boolean): string => {
         const d = doctorTunnelDecision({
           effective,
           running: {
@@ -511,12 +511,13 @@ program
             tunnelConfigId: info.tunnelConfigId,
             url: info.publicUrl ?? info.tunnel.url,
           },
+          down,
           fix: opts.fix,
           namedReady,
         });
         return JSON.stringify(d);
       };
-      let decisionJson = decision();
+      let decisionJson = decision(false);
       const needsTunnelRestart = (): boolean => {
         const d = JSON.parse(decisionJson) as { restart: boolean };
         return (
@@ -531,17 +532,12 @@ program
         try {
           runtime = (await ensureBridge(root)).runtime;
           info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-          decisionJson = decision(); // re-evaluate AFTER the restart
+          decisionJson = decision(false); // re-evaluate AFTER the restart
           results.push("已切换到固定域名连接");
         } catch (error) {
           report.tunnel = { ok: false, detail: (error as Error).message };
         }
       }
-      const tunnelDecision = JSON.parse(decisionJson) as {
-        red: boolean;
-        restart: boolean;
-        detail?: string;
-      };
       const expectedPublic = Boolean(lastEndpoint?.publicUrl) || namedReady;
       let currentUrl = info.publicUrl ?? info.tunnel.url;
       let healthy = false;
@@ -576,10 +572,22 @@ program
         }
       }
 
+      // Re-evaluate with real reachability after the probe: a matching but
+      // DOWN machine tunnel stays red and must NOT route into the login flow.
+      const down = !currentUrl || !healthy;
+      const tunnelDecision = JSON.parse(decision(down)) as {
+        red: boolean;
+        restart: boolean;
+        detail?: string;
+        loginRepair: boolean;
+      };
+      if (tunnelDecision.loginRepair) {
+        namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
+      }
       if (tunnelDecision.red) {
         // Reconciliation failures (malformed config, config/identity
         // mismatch, machine tunnel down) outrank generic reachability.
-        report.tunnel = { ok: false, detail: tunnelDecision.detail! };
+        report.tunnel = report.tunnel ?? { ok: false, detail: tunnelDecision.detail! };
       } else if (machineMalformed) {
         // A broken machine config stays a hard failure even while an old,
         // still-healthy tunnel keeps the address reachable.
@@ -618,7 +626,10 @@ program
             report.oauth = { ok: false, detail: (error as Error).message };
           }
         }
-      } else if (namedReady) {
+      } else if (namedReady && effective.source !== "machine") {
+        // Per-workspace provisioned named mode only: a Cloudflare login is
+        // the repair. Machine mode never takes this path (handled above via
+        // the decision's loginRepair=false).
         report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };
         namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
       } else if (expectedPublic) {
