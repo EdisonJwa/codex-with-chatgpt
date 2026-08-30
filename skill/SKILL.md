@@ -411,3 +411,4 @@ the previous public address is gone. Doctor already started a new one.
 | Port conflict | handled automatically; never surface to the user |
 | Every new chat “repairs” / cannot write the log or settings directory | `c2c sandbox-allow --json` (once). Do not ask the user. |
 | cloudflared missing | install it yourself (brew/winget), then retry |
+| Start fails with "The fixed address … is currently served by workspace …" | Another workspace's bridge holds that hostname. Never kill it yourself — tell the user which workspace holds it and ask whether to move it (run `c2c stop` in that workspace, then start here) or keep it where it is. |
