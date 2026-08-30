@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import readline from "node:readline";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
@@ -10,8 +11,17 @@ const CONNECTED_RE = /registered tunnel connection/i;
 const HOSTNAME_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 
 export interface CloudflaredNamedTunnelOptions {
-  tunnelName: string;
+  /** DNS hostname the fixed public URL routes on (the ownership claim key). */
   hostname: string;
+  /** Tunnel name — display/fallback target when no UUID is available. */
+  tunnelName?: string;
+  /** Tunnel UUID — preferred run target when available. */
+  tunnelId?: string;
+  /**
+   * Explicit tunnel credentials JSON. When set, cloudflared runs with
+   * --credentials-file instead of relying on ~/.cloudflared state.
+   */
+  credentialsFile?: string;
   logger?: Logger;
   binaryOverride?: string;
   startTimeoutMs?: number;
@@ -31,6 +41,18 @@ export function normalizeNamedTunnelHostname(hostname: string): string {
   return normalized;
 }
 
+/** The cloudflared argv for one connector run (exported for tests). */
+export function buildNamedRunArgs(opts: {
+  target: string;
+  localPort: number;
+  credentialsFile?: string;
+}): string[] {
+  const args = ["tunnel", "--no-autoupdate"];
+  if (opts.credentialsFile) args.push("--credentials-file", opts.credentialsFile);
+  args.push("--url", `http://127.0.0.1:${opts.localPort}`, "run", opts.target);
+  return args;
+}
+
 /**
  * Locally-managed Cloudflare named tunnel.
  *
@@ -40,8 +62,10 @@ export function normalizeNamedTunnelHostname(hostname: string): string {
  */
 export class CloudflaredNamedTunnel implements TunnelProvider {
   readonly name = "cloudflare-named";
-  private readonly tunnelName: string;
   private readonly hostname: string;
+  private readonly tunnelName?: string;
+  private readonly tunnelId?: string;
+  private readonly credentialsFile?: string;
   private readonly logger: Logger;
   private readonly binaryOverride?: string;
   private readonly startTimeoutMs: number;
@@ -52,16 +76,27 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   private claim: TunnelClaim | null = null;
 
   constructor(opts: CloudflaredNamedTunnelOptions) {
-    const tunnelName = opts.tunnelName.trim();
-    if (!tunnelName || tunnelName.length > 128) {
+    const hasName = typeof opts.tunnelName === "string" && opts.tunnelName.trim() !== "";
+    const hasId = typeof opts.tunnelId === "string" && opts.tunnelId.trim() !== "";
+    if (!hasName && !hasId) {
+      throw new Error("A named tunnel needs a tunnelId or a tunnelName");
+    }
+    if (hasName && (opts.tunnelName as string).trim().length > 128) {
       throw new Error("Named tunnel name must be between 1 and 128 characters");
     }
-    this.tunnelName = tunnelName;
+    this.tunnelName = hasName ? (opts.tunnelName as string).trim() : undefined;
+    this.tunnelId = hasId ? (opts.tunnelId as string).trim() : undefined;
     this.hostname = normalizeNamedTunnelHostname(opts.hostname);
+    this.credentialsFile = opts.credentialsFile;
     this.logger = opts.logger ?? nullLogger;
     this.binaryOverride = opts.binaryOverride;
     this.startTimeoutMs = opts.startTimeoutMs ?? 45_000;
     this.owner = opts.owner ?? { pid: process.pid, workspaceId: "unknown" };
+  }
+
+  /** What cloudflared runs: the tunnel UUID when available, else the name. */
+  private target(): string {
+    return this.tunnelId ?? this.tunnelName ?? "";
   }
 
   private binary(): string | null {
@@ -80,6 +115,9 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
         "cloudflared is not installed. Install it (e.g. `brew install cloudflared`) and retry."
       );
     }
+    if (this.credentialsFile && !fs.existsSync(this.credentialsFile)) {
+      throw new Error(`Tunnel credentials file not found: ${this.credentialsFile}`);
+    }
     // One connector per hostname per machine: two bridges running cloudflared
     // for the same hostname with different local ports would make Cloudflare
     // round-robin requests onto the wrong workspace (e.g. two workspaces
@@ -91,14 +129,11 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     return new Promise<string>((resolve, reject) => {
       const child = spawn(
         bin,
-        [
-          "tunnel",
-          "--no-autoupdate",
-          "--url",
-          `http://127.0.0.1:${localPort}`,
-          "run",
-          this.tunnelName,
-        ],
+        buildNamedRunArgs({
+          target: this.target(),
+          localPort,
+          credentialsFile: this.credentialsFile,
+        }),
         { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
       );
       this.child = child;
@@ -203,6 +238,11 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     const bin = this.binary();
     const problems: string[] = [];
     if (!bin) problems.push("cloudflared binary not found");
+    if (this.credentialsFile && !fs.existsSync(this.credentialsFile)) {
+      // Distinct from binary/connectivity problems: re-running Cloudflare
+      // login does not fix a missing tunnel credential file.
+      problems.push(`tunnel credentials file not found: ${this.credentialsFile}`);
+    }
     if (bin && !this.child) problems.push("named tunnel process not running");
     if (this.child && !this.connected) problems.push("named tunnel is not connected yet");
     return {

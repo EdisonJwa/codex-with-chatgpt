@@ -9,26 +9,12 @@ import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
-import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
-import { namedTunnelBinding, readTunnelState } from "../tunnel/state.js";
+import { resolveTunnelProvider } from "../tunnel/resolve.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
-
-function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
-  const binding = namedTunnelBinding(readTunnelState(workspaceId));
-  if (binding) {
-    return new CloudflaredNamedTunnel({
-      tunnelName: binding.tunnelName,
-      hostname: binding.hostname,
-      logger,
-      owner: { pid: process.pid, workspaceId },
-    });
-  }
-  return new CloudflaredQuickTunnel(logger);
-}
 
 export interface BridgeOptions {
   workspaceRoot: string;
@@ -90,7 +76,12 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
-  const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
+  // Effective tunnel resolution: machine tunnel.json override > per-workspace
+  // named state > Quick. A malformed machine config throws here — the bridge
+  // must not silently come up on a rotating endpoint when a fixed address was
+  // configured but cannot be used.
+  const tunnel =
+    opts.tunnelProvider ?? resolveTunnelProvider(workspace.id, logger).provider;
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;

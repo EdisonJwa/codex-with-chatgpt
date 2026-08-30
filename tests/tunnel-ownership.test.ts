@@ -73,7 +73,7 @@ describe("tunnel ownership", () => {
     }
   });
 
-  it("a claim whose process died self-heals on the next claim", async () => {
+  it("a stale claim fails closed with manual remediation instead of self-healing", async () => {
     const stateDir = isolateStateDir();
     const crashed = spawnSleeper();
     try {
@@ -87,6 +87,13 @@ describe("tunnel ownership", () => {
       const deadline = Date.now() + 5000;
       while (pidAlive(crashed.pid) && Date.now() < deadline) await sleep(50);
       expect(pidAlive(crashed.pid)).toBe(false);
+      // A dead holder must NOT be auto-reclaimed: two recovering starters
+      // could otherwise race over the same generation. Fail closed instead.
+      expect(() =>
+        acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-b" }, "https://c2c-b.example.com")
+      ).toThrow(/no longer running/);
+      // Manual remediation (deleting the stale generation) unblocks the claim.
+      fs.rmSync(lockFileFor(stateDir, "my-laptop"));
       const reclaimed = acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-b" }, "https://c2c-b.example.com");
       reclaimed.release();
     } finally {
