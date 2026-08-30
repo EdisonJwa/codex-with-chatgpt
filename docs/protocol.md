@@ -1,6 +1,6 @@
 # C2C Agent Protocol
 
-Control plane: Computer Use (tiny structured messages typed into the ChatGPT UI).
+Control plane: the in-app browser (tiny structured messages typed into the ChatGPT UI).
 Data plane: MCP (ChatGPT pulls files, diffs, search results itself).
 
 Never mix the two: control messages carry state, never content.
@@ -124,13 +124,15 @@ NEEDS:
 ...
 ```
 
-### HANDOFF (Codex → new ChatGPT conversation)
+### HANDOFF (Codex → replacement Temporary Chat)
 
-One workspace keeps one long-lived C2C conversation (`c2c session get/set`).
-Codex switches to a new chat only when the user asks for it or the old chat has
-grown long enough to lag. Right after the boot prompt, Codex sends a HANDOFF so
-the new chat can continue seamlessly — a brief, never a data dump (the new chat
-re-reads code via MCP):
+C2C conversations are Temporary Chats (one per Codex session); no conversation
+URL is persisted. A HANDOFF is sent only when a NON-terminal task must continue
+in a replacement chat (the previous temp chat was lost, closed, or visibly
+lagging). Right after the boot prompt, Codex sends a HANDOFF so the new chat
+can continue seamlessly — a brief, never a data dump (the new chat re-reads
+code via MCP), reconstructed from the local execution records
+(`goal`, per-iteration progress, `state`, `summary`, `nextExpectedStep`):
 
 ```
 [C2C]

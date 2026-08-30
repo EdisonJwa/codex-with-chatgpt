@@ -39,10 +39,11 @@ whatever data it needs by itself.
      你浏览器的正常使用。ChatGPT 只能跑在内置浏览器里。" Only if the user replies
      with an explicit "我愿意承担影响" may you proceed in their browser; otherwise
      keep ChatGPT in the built-in browser, every time they ask.
-6. Reuse ONE ChatGPT conversation per workspace (see Conversation management).
-   Never silently start a new chat. Each workspace also has exactly ONE ChatGPT
-   connector. Do not create a second connector for the same workspace. Other
-   workspaces may have their own connectors — never edit those.
+6. Use ONE **personalized Temporary Chat per Codex session** for all C2C work
+   (see Temporary chats). Never persist a conversation URL, and never run
+   `c2c session set`. Each workspace also has exactly ONE ChatGPT connector.
+   Do not create a second connector for the same workspace. Other workspaces
+   may have their own connectors — never edit those.
 7. After first-time setup, never ask the user to approve writing C2C's local
    settings directory. Run `c2c sandbox-allow --json` (idempotent). If it fails
    with EPERM / Operation not permitted, request elevated permissions and retry
@@ -89,8 +90,9 @@ that close the tab, hide the window, or stall on the settings page.
    - 开发人员模式: `https://chatgpt.com/#settings/Security`
    - 插件总管: `https://chatgpt.com/plugins`
    - 加插件: `https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins`
-   - 新对话 (only if no saved session): `https://chatgpt.com/`
-   - Saved C2C chat: the URL from `c2c session`
+   - Temporary Chat (one per Codex session): `https://chatgpt.com/?temporary-chat=true`
+   - Existing temp chat of this session: keep using its current URL; never
+     re-goto it, never save it
    Never click Reconnect / Refresh on an existing connector. The old address is
    dead and that page hangs on "This site cannot be reached". When the address
    changed: Delete THIS workspace's `connectorName` only, then create it again
@@ -167,7 +169,10 @@ that starts a tunnel). Do not mention tunnels, wrangler, DNS, or hostnames.
 Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
 
 1. `c2c tunnel status -w <workspace> --json`
-2. If `needsChoice` is false: do not ask again.
+2. If `needsChoice` is false: do not ask again. If `effectiveSource` is
+   `machine`, a machine-wide fixed address (tunnel.json, managed with
+   `c2c tunnel machine-status / machine-set / machine-unset`) overrides the
+   per-workspace choice — treat it as 固定域名 and never ask.
 3. If `needsChoice` is true: tell the user exactly `userPrompt` and wait.
    - 没有账号 / 没有域名 / 临时 / 不用 →
      `c2c tunnel choose -w <ws> --mode quick --json`
@@ -215,12 +220,13 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
      Fill the known form in one script when you can. Then Connect / Authorize
      and type the pairing code. As soon as it shows Connected / authorized /
      pairing accepted, continue — do NOT wait for 8 tools on this page.
-5. Same tab: `goto` `https://chatgpt.com/` (this IS the C2C conversation, not a
-   throwaway). Send the boot prompt from `docs/protocol.md` §Boot Prompt, then
-   (same chat) send:
+5. Same tab: `goto` `https://chatgpt.com/?temporary-chat=true` (one personalized
+   Temporary Chat per Codex session — see Temporary chats). Verify the
+   connector is available there, send the boot prompt from `docs/protocol.md`
+   §Boot Prompt, then (same chat) send:
    `Use the "<connectorName>" connector: call workspace_info and read hello-style top-level file. Reply with the workspace name.`
    Confirm the reply matches `workspaceName` (wait per **In-app browser** §8).
-   Save the chat URL with `c2c session set` (see Conversation management).
+   Never save this chat's URL; record the task locally with `c2c record`.
    markDeliverable.
 6. Report to the user exactly in this shape (no internals):
 
@@ -239,31 +245,36 @@ Ready.
 If a login wall appears (ChatGPT, Cloudflare): stop, tell the user the ONE thing
 to do ("请登录 ChatGPT，完成后告诉我'好了'"), then continue.
 
-## Conversation management (one chat per workspace)
+## Temporary chats (one personalized Temporary Chat per Codex session)
 
-The workspace has ONE long-lived C2C conversation in ChatGPT. Do not open a new
-chat per task or per Codex session.
+C2C work runs in ChatGPT **Temporary Chats**: nothing is kept in chat history
+or used for training, so the workspace's plans and code discussions stay
+local. There is no saved conversation URL — continuity comes from the local
+task records.
 
-- **Find it**: `c2c session -w <ws> --json` → `{ session: { url, taskId, ... } }`.
-  If a session exists, `goto` that URL on the same iab tab (foreground +
-  markHandoff) and continue there.
-- **Save it**: right after creating a new C2C chat (boot prompt sent), read the
-  conversation URL from the iab address bar (visible UI state only)
-  and run `c2c session set -w <ws> --url <url> --title "C2C <workspace name>"`.
-- **Update it**: after each EXECUTED/DONE, run
-  `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>`.
-- **Switch it** ONLY when (a) the user explicitly asks for a new chat, or
-  (b) the current chat has become so long it visibly lags. When switching:
-  1. Same iab tab: `goto` `https://chatgpt.com/`, send the boot prompt.
-  2. Immediately send a HANDOFF message (template in `docs/protocol.md`) —
-     a short brief of: original goal, iterations so far, what is already DONE,
-     current state, known issues, and the next expected step. The new chat must
-     be able to continue the task without re-asking anything; it re-reads code
-     via MCP, so never paste files into the handoff.
-  3. `c2c session set` with the new URL (this overwrites the old one).
-- If the saved chat 404s or was deleted, treat it as a switch: new chat + boot
-  prompt + HANDOFF reconstructed from `c2c session get` and recent
-  `execution_summary` records.
+- **Start (once per Codex session)**: same iab tab, `goto`
+  `https://chatgpt.com/?temporary-chat=true`. Verify the chat is actually a
+  Temporary Chat (the UI labels it), and that the connector is available in
+  it — Temporary Chats must be **personalized** for plugins/connectors to
+  appear. Never type anything before both checks pass.
+- **Smoke gate (mandatory)**: right after the boot prompt, send the
+  `workspace_info` check through the connector. If the connector is NOT
+  available in the Temporary Chat, fall back deliberately: open a normal
+  `https://chatgpt.com/` chat for this session, tell the user one line why
+  (临时对话暂不支持连接器，已用普通对话代替，内容不落本地记录), and continue —
+  do not send C2C messages into a chat without MCP.
+- **Reuse** that Temporary Chat for all C2C work in this Codex session. Do
+  not open a second temp chat mid-session, do not save its URL, and never
+  run `c2c session set`.
+- **Task state** lives in local records: at task start record
+  `c2c record --task <id> --iteration 0 --state INIT --goal "<goal>"`; at
+  EXECUTED/DONE/BLOCKED record state + summary + next step. This is what a
+  replacement chat reconstructs from.
+- **HANDOFF** is only for continuing a NON-terminal task in a replacement
+  chat (previous temp chat lost/closed, or visibly lagging). Send the boot
+  prompt, then a HANDOFF brief reconstructed from `execution_summary`
+  records (goal, progress, current state, known issues, next expected
+  step). A brand-new task needs only Boot Prompt + INIT — no HANDOFF.
 
 ## Workflow: coding task（"使用 Codex with ChatGPT 完成 XXX"）
 
@@ -271,8 +282,10 @@ Protocol states: INIT → PLAN → EXECUTING → EXECUTED → REVIEW → (PLAN |
 All control messages start with `[C2C]`. Keep Codex→ChatGPT messages under 1 KB.
 ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/protocol.md`.
 
-0. `c2c tunnel status -w <workspace> --json`. If `needsChoice`, follow
-   **Connection choice** first (existing installs: ask once, then remember).
+0. `c2c tunnel status -w <workspace> --json`. If `effectiveSource` is
+   `machine`, the machine-wide fixed address is in charge — there is nothing
+   to choose. Otherwise, if `needsChoice`, follow **Connection choice** first
+   (existing installs: ask once, then remember).
    Then `c2c doctor -w <workspace> --json` (auto-repairs). **Doctor gate:** if local
    is not green, do not open ChatGPT and do not send INIT. If
    `namedRepair.needed` is true, tell the user `namedRepair.userMessage`, run
@@ -280,11 +293,15 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    again. If `chatgptRepair.needed` is true, tell the user `chatgptRepair.userMessage`
    (one paragraph, no internals), run **Workflow: reconnect after address
    reclaim**, then doctor again and only continue when the gate is green.
-   Generate task id: `c2c_` + 4 random hex chars.
-1. Open the saved C2C conversation on the same iab tab (`c2c session --json`);
-   only `goto` `https://chatgpt.com/` if none is saved. Foreground + markHandoff.
-   On a NEW conversation first send the boot prompt from
-   `docs/protocol.md` §Boot Prompt, then save the session URL. Do not use the
+   Generate task id: `c2c_` + 4 random hex chars. Record the task start
+   locally: `c2c record -w <ws> --task <id> --iteration 0 --state INIT
+   --goal "<the user's goal>"`.
+1. Use this Codex session's Temporary Chat on the same iab tab: if the
+   session has none yet, `goto`
+   `https://chatgpt.com/?temporary-chat=true` and verify the connector is
+   available (see **Temporary chats** smoke gate). Foreground + markHandoff.
+   In a NEW temp chat first send the boot prompt from
+   `docs/protocol.md` §Boot Prompt. Never save the chat URL. Do not use the
    browser to re-read code MCP already provides. After sending a control
    message, wait per **In-app browser** §8.
 2. Send INIT with the user's goal:
@@ -383,11 +400,13 @@ the previous public address is gone. Doctor already started a new one.
      (or `c2c pair --json` if it expired). Continue as soon as it is Connected —
      do not wait for 8 tools on the settings page.
    - If the name is already gone, skip Delete and only create.
-4. `c2c doctor --json` again. Same tab: `goto` the saved conversation
-   (`c2c session`) only after the Doctor gate is green. Do not start a new
-   audit/task chat just because the address changed.
-5. If the ChatGPT conversation was lost, follow Conversation management → Switch:
-   new chat, boot prompt, HANDOFF. No file re-uploading (the workspace lives in MCP).
+4. `c2c doctor --json` again. Only after the Doctor gate is green: continue in
+   this session's Temporary Chat if it is still open; otherwise open a fresh
+   one (Temporary chats). Do not start a new audit/task chat just because the
+   address changed.
+5. If the session's chat was lost mid-task, follow Temporary chats → HANDOFF:
+   new temp chat, boot prompt, HANDOFF brief from the local task records.
+   No file re-uploading (the workspace lives in MCP).
 
 ## Workflow: repair（anything looks broken）
 
