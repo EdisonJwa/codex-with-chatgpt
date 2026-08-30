@@ -24,6 +24,7 @@ function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider
       tunnelName: binding.tunnelName,
       hostname: binding.hostname,
       logger,
+      owner: { pid: process.pid, workspaceId },
     });
   }
   return new CloudflaredQuickTunnel(logger);

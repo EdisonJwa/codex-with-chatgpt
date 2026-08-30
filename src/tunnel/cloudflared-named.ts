@@ -3,6 +3,7 @@ import readline from "node:readline";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { findBinary } from "./detect.js";
+import { acquireTunnelOwnership, type TunnelClaim, type TunnelOwner } from "./ownership.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provider.js";
 
 const CONNECTED_RE = /registered tunnel connection/i;
@@ -14,6 +15,12 @@ export interface CloudflaredNamedTunnelOptions {
   logger?: Logger;
   binaryOverride?: string;
   startTimeoutMs?: number;
+  /**
+   * Who is starting this tunnel (the bridge process). Identifies the claimant
+   * for the machine-wide ownership claim; direct constructions default to the
+   * current process.
+   */
+  owner?: TunnelOwner;
 }
 
 export function normalizeNamedTunnelHostname(hostname: string): string {
@@ -38,9 +45,11 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   private readonly logger: Logger;
   private readonly binaryOverride?: string;
   private readonly startTimeoutMs: number;
+  private readonly owner: TunnelOwner;
   private child: ChildProcess | null = null;
   private connected = false;
   private lastError: string | null = null;
+  private claim: TunnelClaim | null = null;
 
   constructor(opts: CloudflaredNamedTunnelOptions) {
     const tunnelName = opts.tunnelName.trim();
@@ -52,6 +61,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     this.logger = opts.logger ?? nullLogger;
     this.binaryOverride = opts.binaryOverride;
     this.startTimeoutMs = opts.startTimeoutMs ?? 45_000;
+    this.owner = opts.owner ?? { pid: process.pid, workspaceId: "unknown" };
   }
 
   private binary(): string | null {
@@ -70,7 +80,14 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
         "cloudflared is not installed. Install it (e.g. `brew install cloudflared`) and retry."
       );
     }
-
+    // One connector per hostname per machine: two bridges running cloudflared
+    // for the same hostname with different local ports would make Cloudflare
+    // round-robin requests onto the wrong workspace (e.g. two workspaces
+    // whose names slug to the same c2c-<name>.<zone>). The hostname — not the
+    // tunnel name — is what DNS routes on, so that is what is claimed.
+    if (!this.claim) {
+      this.claim = acquireTunnelOwnership(this.hostname, this.owner, this.publicUrl());
+    }
     return new Promise<string>((resolve, reject) => {
       const child = spawn(
         bin,
@@ -124,6 +141,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
       child.on("error", (error) => {
         this.child = null;
         this.connected = false;
+        this.releaseClaim();
         finish(() => reject(error));
       });
       child.on("exit", (code) => {
@@ -131,6 +149,9 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
         this.logger.warn(`cloudflared named tunnel exited with code ${code}`);
         this.child = null;
         this.connected = false;
+        // The connector is gone either way — free the machine-wide claim so
+        // another workspace can take the hostname over.
+        this.releaseClaim();
         if (wasStarting) {
           finish(() =>
             reject(
@@ -146,12 +167,18 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     });
   }
 
+  private releaseClaim(): void {
+    this.claim?.release();
+    this.claim = null;
+  }
+
   async stop(): Promise<void> {
     if (this.child) {
       this.child.kill("SIGTERM");
       this.child = null;
     }
     this.connected = false;
+    this.releaseClaim();
   }
 
   async restart(localPort: number): Promise<string> {
