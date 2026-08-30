@@ -143,6 +143,7 @@ interface AdminInfo {
   port: number;
   publicUrl: string | null;
   tunnel: { running: boolean; url: string | null; provider: string; detail?: string };
+  tunnelSource?: "machine" | "workspace" | "quick" | "override";
   tokenCount: number;
   pairingActive: boolean;
   pid: number;
@@ -493,7 +494,12 @@ program
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      if (namedReady && opts.fix && info.tunnel.provider !== "cloudflare-named") {
+      if (
+        namedReady &&
+        opts.fix &&
+        (info.tunnel.provider !== "cloudflare-named" ||
+          (effective.source === "machine" && info.tunnelSource !== "machine"))
+      ) {
         await stopBridge(root);
         await new Promise((resolve) => setTimeout(resolve, 400));
         try {
@@ -538,7 +544,11 @@ program
         }
       }
 
-      if (currentUrl && healthy) {
+      if (machineMalformed) {
+        // A broken machine config stays a hard failure even while an old,
+        // still-healthy tunnel keeps the address reachable.
+        report.tunnel = { ok: false, detail: effective.error! };
+      } else if (currentUrl && healthy) {
         report.tunnel = { ok: true, detail: currentUrl };
         const nextMcp = mcpUrlFromPublic(currentUrl);
         const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);

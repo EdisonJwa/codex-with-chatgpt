@@ -89,6 +89,63 @@ describe("tunnel ownership", () => {
     }
   });
 
+  it("the claim stays held while the connector child is terminating", async () => {
+    const stateDir = isolateStateDir();
+    try {
+      const { PassThrough } = await import("node:stream");
+      const { EventEmitter } = await import("node:events");
+      const { CloudflaredNamedTunnel } = await import("../src/tunnel/cloudflared-named.js");
+      const { nullLogger } = await import("../src/logger/index.js");
+
+      const makeFakeChild = (exitDelayMs: number) => {
+        const child: any = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.kill = () => {
+          setTimeout(() => child.emit("exit", 0, null), exitDelayMs);
+          return true;
+        };
+        return child;
+      };
+
+      let fake = makeFakeChild(500);
+      const provider = new CloudflaredNamedTunnel({
+        hostname: "c2c-test.example.com",
+        tunnelId: "b42367b0-4892-4dbe-a3c2-279e6de880f4",
+        logger: nullLogger,
+        binaryOverride: "fake-cloudflared",
+        spawnOverride: () => {
+          queueMicrotask(() => fake.stdout.end("Registered tunnel connection\n"));
+          return fake;
+        },
+        owner: { pid: process.pid, workspaceId: "ws-holder" },
+      });
+
+      await provider.start(48765); // claims the hostname, connector "connected"
+
+      // Initiate stop: the fake child exits 500ms after SIGTERM.
+      const stopping = provider.stop();
+      // While the child is still terminating, the hostname stays claimed.
+      expect(() =>
+        acquireTunnelOwnership(
+          "c2c-test.example.com",
+          { pid: process.pid, workspaceId: "ws-other" },
+          "https://c2c-test.example.com"
+        )
+      ).toThrow(/currently served by/);
+      // Only after stop() resolves (child confirmed gone) is the claim free.
+      await stopping;
+      const freed = acquireTunnelOwnership(
+        "c2c-test.example.com",
+        { pid: process.pid, workspaceId: "ws-other" },
+        "https://c2c-test.example.com"
+      );
+      freed.release();
+    } finally {
+      cleanup(path.join(stateDir, "runtime", "tunnels"));
+    }
+  });
+
   it("a stale claim fails closed with manual remediation instead of self-healing", async () => {
     const stateDir = isolateStateDir();
     const crashed = spawnSleeper();

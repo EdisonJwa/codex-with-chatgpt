@@ -25,6 +25,8 @@ export interface CloudflaredNamedTunnelOptions {
   logger?: Logger;
   binaryOverride?: string;
   startTimeoutMs?: number;
+  /** Test seam: override the child_process spawn call. */
+  spawnOverride?: typeof spawn;
   /**
    * Who is starting this tunnel (the bridge process). Identifies the claimant
    * for the machine-wide ownership claim; direct constructions default to the
@@ -69,6 +71,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   private readonly logger: Logger;
   private readonly binaryOverride?: string;
   private readonly startTimeoutMs: number;
+  private readonly spawnOverride?: typeof spawn;
   private readonly owner: TunnelOwner;
   private child: ChildProcess | null = null;
   private connected = false;
@@ -91,6 +94,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     this.logger = opts.logger ?? nullLogger;
     this.binaryOverride = opts.binaryOverride;
     this.startTimeoutMs = opts.startTimeoutMs ?? 45_000;
+    this.spawnOverride = opts.spawnOverride;
     this.owner = opts.owner ?? { pid: process.pid, workspaceId: "unknown" };
   }
 
@@ -127,7 +131,8 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
       this.claim = acquireTunnelOwnership(this.hostname, this.owner, this.publicUrl());
     }
     return new Promise<string>((resolve, reject) => {
-      const child = spawn(
+      const spawnFn = this.spawnOverride ?? spawn;
+      const child = spawnFn(
         bin,
         buildNamedRunArgs({
           target: this.target(),

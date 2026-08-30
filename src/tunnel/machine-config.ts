@@ -78,6 +78,7 @@ export function parseMachineTunnelConfig(value: unknown): ResolvedMachineTunnel 
   // a path that might exist.
   try {
     if (!fs.statSync(credentialsFile).isFile()) return null;
+    fs.accessSync(credentialsFile, fs.constants.R_OK);
   } catch {
     return null;
   }

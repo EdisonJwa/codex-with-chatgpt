@@ -80,8 +80,12 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   // named state > Quick. A malformed machine config throws here — the bridge
   // must not silently come up on a rotating endpoint when a fixed address was
   // configured but cannot be used.
-  const tunnel =
-    opts.tunnelProvider ?? resolveTunnelProvider(workspace.id, logger).provider;
+  const resolvedTunnel =
+    opts.tunnelProvider
+      ? { source: "override" as const, provider: opts.tunnelProvider }
+      : resolveTunnelProvider(workspace.id, logger);
+  const tunnel = resolvedTunnel.provider;
+  const tunnelSource = resolvedTunnel.source as string;
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -159,6 +163,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       port,
       publicUrl: publicBaseUrl,
       tunnel: tunnel.status(),
+      tunnelSource,
       tokenCount: authStore.tokenCount(),
       pairingActive: pairing.hasActiveSession(),
       pid: process.pid,

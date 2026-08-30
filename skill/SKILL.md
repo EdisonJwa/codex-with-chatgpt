@@ -248,10 +248,10 @@ to do ("请登录 ChatGPT，完成后告诉我'好了'"), then continue.
 
 ## Temporary chats (one personalized Temporary Chat per Codex session)
 
-C2C work runs in ChatGPT **Temporary Chats**: nothing is kept in chat history
-or used for training, so the workspace's plans and code discussions stay
-local. There is no saved conversation URL — continuity comes from the local
-task records.
+C2C work runs in ChatGPT **Temporary Chats**: they are not shown in chat
+history and are not used for model training (OpenAI may retain a copy for up
+to 30 days for abuse/legal-safety review). There is no saved conversation
+URL — continuity comes from the local task records.
 
 - **Start (once per Codex session)**: same iab tab, `goto`
   `https://chatgpt.com/?temporary-chat=true`. Temporary chats start
