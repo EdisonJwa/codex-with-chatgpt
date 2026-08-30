@@ -186,3 +186,26 @@ Do not mix the host cutover with the CLI rewrite in one commit.
   records from two tools stay separable via `tool`.
 - Real ChatGPT acceptance: personalized Temporary Chat per session with
   connector, no saved URL (carried over from V1 acceptance).
+
+## 12. Relation to steipete/oracle (`askoracle.sh`)
+
+oracle = one-shot CLI/MCP that bundles a prompt with explicitly selected
+files and sends them to a model (API or signed-in ChatGPT/Gemini browser),
+with sessions, follow-ups, multi-model panels, and a Windows-host/SSH
+bridge for browser sessions.
+
+Comparison with C2C:
+- Context model: oracle PUSHES selected files into the prompt; C2C lets the
+  model PULL workspace data itself via read-only MCP (no pasting, agent-
+  driven exploration, live diff/test reads).
+- State: oracle keeps per-run sessions; C2C uses personalized Temporary
+  Chats + local execution records for continuity.
+- Auth: oracle uses API keys or a signed-in browser session (bridge mode =
+  SSH reverse tunnel + bearer token + capability-advertising /health —
+  patterns that independently validate our loopback + admin-token design);
+  C2C uses OAuth + pairing per agent identity.
+- Verdict: complementary, not competing. C2C remains the data plane
+  (workspace MCP); oracle can serve as an OPTIONAL second-model reviewer
+  inside the review loop (via oracle-mcp or `oracle -p ... --file` in the
+  skill's review step) without changing the V2 architecture. Not a
+  dependency; revisit if the user wants oracle-based review as default.
