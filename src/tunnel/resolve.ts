@@ -123,6 +123,49 @@ export function resolveTunnelProvider(
   return { source: "quick", configId: "quick", provider: new CloudflaredQuickTunnel(logger) };
 }
 
+/**
+ * The doctor tunnel decision, factored out as a pure function so the
+ * ordering — reconciliation BEFORE generic reachability — is unit-testable:
+ * a healthy old tunnel must stay red when the effective machine config
+ * differs, and `fix` turns that red into a restart (re-evaluated after).
+ */
+export interface DoctorTunnelDecision {
+  red: boolean;
+  restart: boolean;
+  detail?: string;
+}
+
+export function doctorTunnelDecision(opts: {
+  effective: EffectiveTunnelState;
+  running: RunningTunnelInfo | null;
+  fix: boolean;
+  namedReady: boolean;
+}): DoctorTunnelDecision {
+  const { effective, running, fix, namedReady } = opts;
+  if (effective.source === "machine" && effective.error) {
+    return { red: true, restart: false, detail: effective.error };
+  }
+  if (effective.source === "machine" && effective.machine) {
+    const evaluation = running
+      ? evaluateRunningTunnel(effective, running)
+      : { ok: false as const, restart: false as const, detail: "bridge not running" };
+    if (!evaluation.ok) {
+      // With --fix a restart resolves it; without --fix it stays red.
+      return {
+        red: !(fix && evaluation.restart),
+        restart: Boolean(fix && evaluation.restart),
+        detail: evaluation.detail,
+      };
+    }
+    return { red: false, restart: false };
+  }
+  if (namedReady) {
+    // per-workspace named mode: down tunnel is red; login repair handled by caller
+    return { red: !running, restart: Boolean(fix && !running), detail: "NAMED_TUNNEL_DOWN" };
+  }
+  return { red: false, restart: false };
+}
+
 /** The minimal view of a RUNNING bridge needed to reconcile it. */
 export interface RunningTunnelInfo {
   provider: string;

@@ -12,6 +12,7 @@ import {
 } from "../src/tunnel/machine-config.js";
 import {
   effectiveTunnelState,
+  doctorTunnelDecision,
   evaluateRunningTunnel,
   machineConfigId,
   resolveTunnelProvider,
@@ -289,5 +290,66 @@ describe("running tunnel reconciliation", () => {
     expect(machineConfigId({ hostname: "c2c.example.com", target: "id-1", credentialsFile: "a.json" })).not.toBe(
       machineConfigId({ hostname: "c2c.example.com", target: "id-2", credentialsFile: "a.json" })
     );
+  });
+});
+
+describe("doctor tunnel decision ordering", () => {
+  it("a healthy old-config tunnel stays red without fix and restarts with fix", () => {
+    const stateDir = isolateStateDir();
+    try {
+      writeMachineTunnelConfig({
+        mode: "cloudflare-named" as const,
+        publicUrl: "https://c2c.example.com",
+        tunnelName: "Edison-PC",
+        tunnelId: "b42367b0-4892-4dbe-a3c2-279e6de880f4",
+        credentialsFile: credsFile,
+      }); // effective config B
+      const effective = effectiveTunnelState("ws-doc");
+      // running bridge = machine config A, healthy URL from config A
+      const runningA = {
+        provider: "cloudflare-named",
+        tunnelSource: "machine",
+        tunnelConfigId: "old-generation",
+        url: "https://c2c.example.com",
+      };
+      // diagnose-only: reconciliation red must NOT be downgraded by the
+      // healthy reachability check
+      const noFix = doctorTunnelDecision({ effective, running: runningA, fix: false, namedReady: true });
+      expect(noFix.red).toBe(true);
+      expect(noFix.restart).toBe(false);
+      // with --fix: the decision is a restart (not silent green)
+      const withFix = doctorTunnelDecision({ effective, running: runningA, fix: true, namedReady: true });
+      expect(withFix.red).toBe(false);
+      expect(withFix.restart).toBe(true);
+      // after the restart the recomputed decision is green
+      const after = doctorTunnelDecision({
+        effective,
+        running: { ...runningA, tunnelConfigId: effective.machine!.configId },
+        fix: true,
+        namedReady: true,
+      });
+      expect(after).toEqual({ red: false, restart: false });
+    } finally {
+      clearMachineTunnelConfig();
+      cleanup(path.join(stateDir, "tunnels"));
+    }
+  });
+
+  it("a malformed machine config stays red regardless of fix", () => {
+    const stateDir = isolateStateDir();
+    try {
+      write(stateDir, "tunnel.json", "{ truncated");
+      const effective = effectiveTunnelState("ws-doc");
+      const d = doctorTunnelDecision({
+        effective,
+        running: { provider: "cloudflare-quick", tunnelSource: "quick", url: null },
+        fix: true,
+        namedReady: false,
+      });
+      expect(d.red).toBe(true);
+      expect(d.restart).toBe(false);
+    } finally {
+      cleanup(path.join(stateDir, "tunnels"));
+    }
   });
 });

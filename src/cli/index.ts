@@ -24,7 +24,11 @@ import {
   readMachineTunnel,
   writeMachineTunnelConfig,
 } from "../tunnel/machine-config.js";
-import { evaluateRunningTunnel, effectiveTunnelState } from "../tunnel/resolve.js";
+import {
+  doctorTunnelDecision,
+  evaluateRunningTunnel,
+  effectiveTunnelState,
+} from "../tunnel/resolve.js";
 import {
   isNamedTunnelReady,
   NAMED_LOGIN_PROMPT,
@@ -495,35 +499,49 @@ program
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      const runningEval =
-        effective.source === "machine" && !machineMalformed
-          ? evaluateRunningTunnel(
-              effective,
-              {
-                provider: info.tunnel.provider,
-                tunnelSource: info.tunnelSource,
-                tunnelConfigId: info.tunnelConfigId,
-                url: info.publicUrl ?? info.tunnel.url,
-              }
-            )
-          : null;
-      if (
-        namedReady &&
-        opts.fix &&
-        (runningEval?.restart ||
-          info.tunnel.provider !== "cloudflare-named" ||
-          (effective.source === "machine" && info.tunnelSource !== "machine"))
-      ) {
+      // Reconciliation decision: for a machine override it takes precedence
+      // over generic reachability — a healthy tunnel built from an older
+      // config (or serving another address) must not read as green.
+      const decision = (): string => {
+        const d = doctorTunnelDecision({
+          effective,
+          running: {
+            provider: info.tunnel.provider,
+            tunnelSource: info.tunnelSource,
+            tunnelConfigId: info.tunnelConfigId,
+            url: info.publicUrl ?? info.tunnel.url,
+          },
+          fix: opts.fix,
+          namedReady,
+        });
+        return JSON.stringify(d);
+      };
+      let decisionJson = decision();
+      const needsTunnelRestart = (): boolean => {
+        const d = JSON.parse(decisionJson) as { restart: boolean };
+        return (
+          d.restart ||
+          (namedReady && info.tunnel.provider !== "cloudflare-named") ||
+          (effective.source === "machine" && info.tunnelSource !== "machine")
+        );
+      };
+      if (opts.fix && needsTunnelRestart()) {
         await stopBridge(root);
         await new Promise((resolve) => setTimeout(resolve, 400));
         try {
           runtime = (await ensureBridge(root)).runtime;
           info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+          decisionJson = decision(); // re-evaluate AFTER the restart
           results.push("已切换到固定域名连接");
         } catch (error) {
           report.tunnel = { ok: false, detail: (error as Error).message };
         }
       }
+      const tunnelDecision = JSON.parse(decisionJson) as {
+        red: boolean;
+        restart: boolean;
+        detail?: string;
+      };
       const expectedPublic = Boolean(lastEndpoint?.publicUrl) || namedReady;
       let currentUrl = info.publicUrl ?? info.tunnel.url;
       let healthy = false;
@@ -558,7 +576,11 @@ program
         }
       }
 
-      if (machineMalformed) {
+      if (tunnelDecision.red) {
+        // Reconciliation failures (malformed config, config/identity
+        // mismatch, machine tunnel down) outrank generic reachability.
+        report.tunnel = { ok: false, detail: tunnelDecision.detail! };
+      } else if (machineMalformed) {
         // A broken machine config stays a hard failure even while an old,
         // still-healthy tunnel keeps the address reachable.
         report.tunnel = { ok: false, detail: effective.error! };
@@ -595,23 +617,6 @@ program
           } catch (error) {
             report.oauth = { ok: false, detail: (error as Error).message };
           }
-        }
-      } else if (machineMalformed) {
-        report.tunnel = report.tunnel ?? { ok: false, detail: effective.error! };
-      } else if (runningEval && !runningEval.ok) {
-        // Healthy-but-wrong (e.g. an older machine config) must stay red.
-        report.tunnel = { ok: false, detail: runningEval.detail! };
-        results.push(`需要重启 Bridge 以应用本机固定地址配置（${runningEval.detail}）`);
-      } else if (namedReady && effective.source === "machine") {
-        // Machine-mode failures (missing credentials, ownership conflicts,
-        // bad tunnel id, cloudflared down) are NOT repaired by a Cloudflare
-        // login — keep the actual error and never funnel into the login flow.
-        const detail =
-          info.tunnel.detail ??
-          (effective.machine ? `machine tunnel ${effective.machine.hostname} is down` : "machine tunnel down");
-        report.tunnel = report.tunnel ?? { ok: false, detail };
-        if (!currentUrl || !healthy) {
-          results.push(`固定地址不可用：${detail}`);
         }
       } else if (namedReady) {
         report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };
