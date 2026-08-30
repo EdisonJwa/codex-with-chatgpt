@@ -5,22 +5,32 @@ ARCHITECTURAL CORRECTIONS, folded in below. Target branch: `refactor/v2`.
 We maintain this fork permanently; upstream compat is dropped; clean state
 break accepted (one-time re-pair).
 
-## 1. Shared host, workspace-scoped public routing
+## 1. Shared host, ONE MCP endpoint, multiple agent identities
+
+USER DECISION (overrides the review's per-workspace URL correction):
+multiple agents/identities share ONE canonical MCP endpoint.
 
 - ONE machine-level host process serves all workspaces (registry +
   token dispatch), one machine tunnel, one connector.
-- **Per-workspace resource URLs** (required correction — token dispatch
-  alone does not bind pre-auth OAuth/DCR/pairing to a workspace):
-  - Public shape: `https://<host>/w/<workspaceId>/mcp`
-  - Workspace-scoped OAuth routes: `/w/<id>/.well-known/...`,
-    `/w/<id>/oauth/{register,authorize,token,revoke}`
-  - Bearer tokens validated against BOTH workspaceId and resource path.
-  - Multiple connectors get genuinely distinct MCP resources; no
-    machine-global token index; no scanning every auth store per request.
-  - Plain `/mcp` is at most a legacy migration route, not canonical.
-  - Do NOT point multiple connectors at an identical `/mcp` URL unless a
-    real acceptance test proves connector-instance token isolation.
-- Tokens bound to the expected OAuth `resource`, not only workspaceId.
+- Public shape: `https://<host>/mcp` — the single canonical endpoint.
+- **Multiple agent identities**: every connecting agent/tool performs its
+  own DCR (unique clientId per connector) and its own pairing
+  (the pairing code selects the workspace). Tokens are issued per client
+  and bound to BOTH the workspaceId AND the canonical `resource` string
+  (resource-bound tokens), so credentials from a different deployment are
+  rejected and each identity is independently revocable.
+- OAuth routes are host-level (`/oauth/{register,authorize,token,revoke}`
+  + `/.well-known/...`); the consent page names the workspace the pairing
+  code selects; the token exchange carries and validates `resource`.
+- Dispatch at `/mcp`: bearer -> authStore lookup (indexed by client
+  registry) -> token's workspaceId -> that workspace's MCP handler +
+  workspace context. A token whose record's workspaceId differs from its
+  owning store is rejected (403).
+- Accepted trade-off (documented): connector isolation on the ChatGPT
+  side relies on per-connector DCR rather than distinct URLs; the consent
+  page + workspace-named pairing codes are the human-side safeguard.
+- Workspace registry: `host.json` workspaces[] + per-workspace
+  `WorkspaceContext` in the host; register/unregister per workspace.
 
 ## 2. Host election & lifecycle
 
