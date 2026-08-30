@@ -903,6 +903,10 @@ program
   .option("--tests <summary>", "e.g. '27 passed'")
   .option("--exit-status <status>", "ok | failed | blocked", "ok")
   .option("--notes <text>")
+  .option("--state <state>", "protocol state, e.g. INIT / EXECUTED / DONE")
+  .option("--goal <text>", "the user's goal (record at task start for chat continuity)")
+  .option("--summary <text>", "one-paragraph progress summary")
+  .option("--next-step <text>", "what the next iteration/chat is expected to do")
   .action(
     (opts: {
       workspace?: string;
@@ -912,6 +916,10 @@ program
       tests?: string;
       exitStatus: string;
       notes?: string;
+      state?: string;
+      goal?: string;
+      summary?: string;
+      nextStep?: string;
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const changed = /^\d+$/.test(opts.changedFiles)
@@ -925,6 +933,10 @@ program
         exitStatus: opts.exitStatus,
         timestamp: new Date().toISOString(),
         notes: opts.notes,
+        state: opts.state,
+        goal: opts.goal,
+        summary: opts.summary,
+        nextExpectedStep: opts.nextStep,
       });
       check("已记录执行摘要");
     }

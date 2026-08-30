@@ -4,7 +4,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
 import { searchWorkspace } from "../workspace/search.js";
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
-import { latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
+import { latestExecutionRecordWithTests, readExecutionRecords } from "../execution/records.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 
@@ -235,7 +235,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     async (_args, extra) => {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
-      const latest = latestExecutionRecord(workspace.id);
+      // State-only continuity records carry no tests; find the latest real run.
+      const latest = latestExecutionRecordWithTests(workspace.id);
       if (!latest) {
         return ok({ available: false, message: "No execution records yet for this workspace." });
       }
@@ -255,8 +256,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Execution summary",
       description:
-        `Recent Codex execution records for this workspace: task id, iteration, changed files, ` +
-        `tests and exit status. Use it after Codex reports EXECUTED. ${UNTRUSTED_NOTE}`,
+        `Recent Codex execution records for this workspace: task id, iteration, goal/state/summary/next step ` +
+        `(chat-continuation brief), changed files, tests and exit status. Use it after Codex reports EXECUTED. ` +
+        `${UNTRUSTED_NOTE}`,
       inputSchema: {
         limit: z.number().int().min(1).max(50).default(5),
       },

@@ -3,9 +3,14 @@ import path from "node:path";
 import { ensureDir, getStateDir } from "../config/paths.js";
 
 /**
- * Lightweight execution records written by the Codex harness after each
- * iteration (via `c2c record`). ChatGPT reads them through the
- * `execution_summary` and `test_status` MCP tools.
+ * Lightweight execution records written by the Codex harness (via `c2c
+ * record`). ChatGPT reads them through the `execution_summary` and
+ * `test_status` MCP tools.
+ *
+ * Records double as the local continuity store for Temporary Chats: a fresh
+ * chat must be able to reconstruct a non-terminal task from the goal, the
+ * protocol state, a compact summary, and the next expected step — without any
+ * saved ChatGPT conversation URL.
  */
 export interface ExecutionRecord {
   taskId: string;
@@ -15,6 +20,14 @@ export interface ExecutionRecord {
   exitStatus: "ok" | "failed" | "blocked" | string;
   timestamp: string;
   notes?: string;
+  /** Protocol state at recording time (INIT/PLAN/EXECUTED/DONE/BLOCKED...). */
+  state?: string;
+  /** The user's goal, captured at task start (INIT) for continuation briefs. */
+  goal?: string;
+  /** One-paragraph progress summary of what happened so far. */
+  summary?: string;
+  /** What the next iteration/chat is expected to do next. */
+  nextExpectedStep?: string;
 }
 
 function recordsFile(workspaceId: string): string {
@@ -45,4 +58,19 @@ export function readExecutionRecords(workspaceId: string, limit = 10): Execution
 export function latestExecutionRecord(workspaceId: string): ExecutionRecord | null {
   const records = readExecutionRecords(workspaceId, 1);
   return records[records.length - 1] ?? null;
+}
+
+/**
+ * The most recent record that actually carries a test result. State-only
+ * continuity records (INIT/HANDOFF markers with no tests) must not shadow
+ * the last real test run.
+ */
+export function latestExecutionRecordWithTests(workspaceId: string): ExecutionRecord | null {
+  // A state-only record is worth scanning past, but bound the search so a
+  // long all-marker history cannot scan the whole file every call.
+  const records = readExecutionRecords(workspaceId, 200);
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i].tests !== null && records[i].tests !== undefined) return records[i];
+  }
+  return null;
 }
