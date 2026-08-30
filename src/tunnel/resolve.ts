@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { CloudflaredNamedTunnel } from "./cloudflared-named.js";
 import { readMachineTunnel } from "./machine-config.js";
 import { CloudflaredQuickTunnel } from "./cloudflared.js";
@@ -25,7 +26,26 @@ export interface EffectiveTunnelState {
     tunnelId?: string;
     publicUrl: string;
     credentialsFile: string;
+    /** Stable identity of THIS config (source+hostname+target+creds path). */
+    configId: string;
   };
+}
+
+/**
+ * Stable identity of a machine config, hashed from normalized non-secret
+ * fields (never the credential contents). Bridges expose the id they were
+ * started with, so doctor can tell "running bridge predates a config
+ * change" even when both old and new configs are machine-mode.
+ */
+export function machineConfigId(m: {
+  hostname: string;
+  target: string;
+  credentialsFile: string;
+}): string {
+  return createHash("sha256")
+    .update(["machine", m.hostname, m.target, m.credentialsFile].join("|"))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 /**
@@ -47,6 +67,7 @@ export function effectiveTunnelState(workspaceId: string): EffectiveTunnelState 
         tunnelId: machine.resolved.tunnelId,
         publicUrl: machine.resolved.publicUrl,
         credentialsFile: machine.resolved.credentialsFile,
+        configId: machineConfigId(machine.resolved),
       },
     };
   }
@@ -65,7 +86,7 @@ export function resolveTunnelProvider(
   workspaceId: string,
   logger: Logger,
   owner?: TunnelOwner
-): { source: TunnelSource; provider: TunnelProvider } {
+): { source: TunnelSource; provider: TunnelProvider; configId?: string } {
   const effective = effectiveTunnelState(workspaceId);
   if (effective.source === "machine" && effective.error) {
     throw new Error(effective.error);
@@ -74,6 +95,7 @@ export function resolveTunnelProvider(
     const machine = effective.machine;
     return {
       source: "machine",
+      configId: machine.configId,
       provider: new CloudflaredNamedTunnel({
         hostname: machine.hostname,
         tunnelId: machine.tunnelId,
@@ -88,6 +110,7 @@ export function resolveTunnelProvider(
     const binding = namedTunnelBinding(readTunnelState(workspaceId))!;
     return {
       source: "workspace",
+      configId: `workspace:${workspaceId}`,
       provider: new CloudflaredNamedTunnel({
         hostname: binding.hostname,
         tunnelName: binding.tunnelName,
@@ -97,5 +120,50 @@ export function resolveTunnelProvider(
       }),
     };
   }
-  return { source: "quick", provider: new CloudflaredQuickTunnel(logger) };
+  return { source: "quick", configId: "quick", provider: new CloudflaredQuickTunnel(logger) };
+}
+
+/** The minimal view of a RUNNING bridge needed to reconcile it. */
+export interface RunningTunnelInfo {
+  provider: string;
+  tunnelSource?: string;
+  tunnelConfigId?: string;
+  url?: string | null;
+}
+
+/**
+ * Pure reconciliation decision: does the running bridge match the effective
+ * tunnel configuration? Machine overrides are matched by config identity and
+ * by the actual public URL — a healthy tunnel serving the WRONG address is
+ * still wrong.
+ */
+export function evaluateRunningTunnel(
+  effective: EffectiveTunnelState,
+  running: RunningTunnelInfo
+): { ok: boolean; restart: boolean; detail?: string } {
+  if (effective.source === "machine" && effective.machine) {
+    if (running.provider !== "cloudflare-named") {
+      return {
+        ok: false,
+        restart: true,
+        detail: "running bridge is not serving the machine named tunnel",
+      };
+    }
+    if (effective.machine.configId && running.tunnelConfigId !== effective.machine.configId) {
+      return {
+        ok: false,
+        restart: true,
+        detail: "running bridge was started from a different machine config",
+      };
+    }
+    if (running.url && running.url !== effective.machine.publicUrl) {
+      return {
+        ok: false,
+        restart: true,
+        detail: `running tunnel URL ${running.url} does not match the machine address ${effective.machine.publicUrl}`,
+      };
+    }
+    return { ok: true, restart: false };
+  }
+  return { ok: true, restart: false };
 }

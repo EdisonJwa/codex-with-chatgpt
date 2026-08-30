@@ -24,7 +24,7 @@ import {
   readMachineTunnel,
   writeMachineTunnelConfig,
 } from "../tunnel/machine-config.js";
-import { effectiveTunnelState } from "../tunnel/resolve.js";
+import { evaluateRunningTunnel, effectiveTunnelState } from "../tunnel/resolve.js";
 import {
   isNamedTunnelReady,
   NAMED_LOGIN_PROMPT,
@@ -144,6 +144,7 @@ interface AdminInfo {
   publicUrl: string | null;
   tunnel: { running: boolean; url: string | null; provider: string; detail?: string };
   tunnelSource?: "machine" | "workspace" | "quick" | "override";
+  tunnelConfigId?: string;
   tokenCount: number;
   pairingActive: boolean;
   pid: number;
@@ -494,10 +495,23 @@ program
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+      const runningEval =
+        effective.source === "machine" && !machineMalformed
+          ? evaluateRunningTunnel(
+              effective,
+              {
+                provider: info.tunnel.provider,
+                tunnelSource: info.tunnelSource,
+                tunnelConfigId: info.tunnelConfigId,
+                url: info.publicUrl ?? info.tunnel.url,
+              }
+            )
+          : null;
       if (
         namedReady &&
         opts.fix &&
-        (info.tunnel.provider !== "cloudflare-named" ||
+        (runningEval?.restart ||
+          info.tunnel.provider !== "cloudflare-named" ||
           (effective.source === "machine" && info.tunnelSource !== "machine"))
       ) {
         await stopBridge(root);
@@ -584,6 +598,10 @@ program
         }
       } else if (machineMalformed) {
         report.tunnel = report.tunnel ?? { ok: false, detail: effective.error! };
+      } else if (runningEval && !runningEval.ok) {
+        // Healthy-but-wrong (e.g. an older machine config) must stay red.
+        report.tunnel = { ok: false, detail: runningEval.detail! };
+        results.push(`需要重启 Bridge 以应用本机固定地址配置（${runningEval.detail}）`);
       } else if (namedReady && effective.source === "machine") {
         // Machine-mode failures (missing credentials, ownership conflicts,
         // bad tunnel id, cloudflared down) are NOT repaired by a Cloudflare

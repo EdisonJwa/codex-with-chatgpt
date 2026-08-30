@@ -10,14 +10,20 @@ import {
   readMachineTunnel,
   writeMachineTunnelConfig,
 } from "../src/tunnel/machine-config.js";
-import { effectiveTunnelState, resolveTunnelProvider } from "../src/tunnel/resolve.js";
+import {
+  effectiveTunnelState,
+  evaluateRunningTunnel,
+  machineConfigId,
+  resolveTunnelProvider,
+} from "../src/tunnel/resolve.js";
 import { writeTunnelState } from "../src/tunnel/state.js";
 import { buildNamedRunArgs, CloudflaredNamedTunnel } from "../src/tunnel/cloudflared-named.js";
 import { nullLogger } from "../src/logger/index.js";
 
+let credsDir: string;
+let credsFile: string;
+
 describe("machine tunnel config", () => {
-  let credsDir: string;
-  let credsFile: string;
 
   const good = () => ({
     mode: "cloudflare-named" as const,
@@ -35,7 +41,6 @@ describe("machine tunnel config", () => {
 
   afterAll(() => {
     clearMachineTunnelConfig();
-    cleanup(credsDir);
   });
 
   it("parses a valid config, preferring the tunnel UUID as run target", () => {
@@ -211,5 +216,78 @@ describe("generalized named provider", () => {
     expect(source).toBe("workspace");
     expect(provider.name).toBe("cloudflare-named");
     clearMachineTunnelConfig();
+  });
+});
+
+afterAll(() => {
+  cleanup(credsDir);
+});
+
+describe("running tunnel reconciliation", () => {
+  const effectiveMachine = () => {
+    const stateDir = isolateStateDir();
+    writeMachineTunnelConfig({
+      mode: "cloudflare-named" as const,
+      publicUrl: "https://c2c.example.com",
+      tunnelName: "Edison-PC",
+      tunnelId: "b42367b0-4892-4dbe-a3c2-279e6de880f4",
+      credentialsFile: credsFile,
+    });
+    const effective = effectiveTunnelState("ws-recon");
+    cleanup(path.join(stateDir, "tunnels"));
+    return effective;
+  };
+
+  it("a different machine config (same source) forces a restart", () => {
+    const effective = effectiveMachine();
+    const matching = evaluateRunningTunnel(effective, {
+      provider: "cloudflare-named",
+      tunnelSource: "machine",
+      tunnelConfigId: effective.machine!.configId,
+      url: effective.machine!.publicUrl,
+    });
+    expect(matching).toEqual({ ok: true, restart: false });
+    // config B: same provider + source, different credentials path/id
+    const changed = evaluateRunningTunnel(effective, {
+      provider: "cloudflare-named",
+      tunnelSource: "machine",
+      tunnelConfigId: "different-generation",
+      url: effective.machine!.publicUrl,
+    });
+    expect(changed.ok).toBe(false);
+    expect(changed.restart).toBe(true);
+  });
+
+  it("a healthy tunnel serving the wrong machine address stays red", () => {
+    const effective = effectiveMachine();
+    const wrongUrl = evaluateRunningTunnel(effective, {
+      provider: "cloudflare-named",
+      tunnelSource: "machine",
+      tunnelConfigId: effective.machine!.configId,
+      url: "https://old.example.com",
+    });
+    expect(wrongUrl.ok).toBe(false);
+    expect(wrongUrl.detail).toContain("old.example.com");
+  });
+
+  it("quick/workspace running bridges do not match a machine override", () => {
+    const effective = effectiveMachine();
+    for (const provider of ["cloudflare-quick", "cloudflare-named"]) {
+      const evalResult = evaluateRunningTunnel(effective, {
+        provider,
+        tunnelSource: provider === "cloudflare-quick" ? "quick" : "workspace",
+        url: null,
+      });
+      expect(evalResult.restart).toBe(true);
+    }
+  });
+
+  it("configId is stable per config and changes with inputs", () => {
+    expect(machineConfigId({ hostname: "c2c.example.com", target: "id-1", credentialsFile: "a.json" })).toBe(
+      machineConfigId({ hostname: "c2c.example.com", target: "id-1", credentialsFile: "a.json" })
+    );
+    expect(machineConfigId({ hostname: "c2c.example.com", target: "id-1", credentialsFile: "a.json" })).not.toBe(
+      machineConfigId({ hostname: "c2c.example.com", target: "id-2", credentialsFile: "a.json" })
+    );
   });
 });

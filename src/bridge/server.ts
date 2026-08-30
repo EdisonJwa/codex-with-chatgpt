@@ -82,10 +82,11 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   // configured but cannot be used.
   const resolvedTunnel =
     opts.tunnelProvider
-      ? { source: "override" as const, provider: opts.tunnelProvider }
+      ? { source: "override" as const, provider: opts.tunnelProvider, configId: "override" }
       : resolveTunnelProvider(workspace.id, logger);
   const tunnel = resolvedTunnel.provider;
   const tunnelSource = resolvedTunnel.source as string;
+  const tunnelConfigId = resolvedTunnel.configId;
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -164,6 +165,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       publicUrl: publicBaseUrl,
       tunnel: tunnel.status(),
       tunnelSource,
+      tunnelConfigId,
       tokenCount: authStore.tokenCount(),
       pairingActive: pairing.hasActiveSession(),
       pid: process.pid,
