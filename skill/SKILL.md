@@ -106,8 +106,9 @@ that close the tab, hide the window, or stall on the settings page.
    After an action, one cheap DOM check. Do not screenshot-poll.
 
 7. **One conversation.** The first ChatGPT chat is the C2C conversation. Send
-   the boot prompt and the workspace_info check there. Save that URL. Do not
-   open a throwaway verify chat and later another C2C chat.
+   the boot prompt and the workspace_info check there. NEVER save or persist
+   that URL (Temporary Chat policy, Golden rule 6). Do not open a throwaway
+   verify chat and later another C2C chat.
 
 8. **Wait for a ChatGPT reply (do not hold one long browser wait).** After you
    send INIT, EXECUTED, boot, or the workspace_info check: `markHandoff`, keep
@@ -253,10 +254,13 @@ local. There is no saved conversation URL — continuity comes from the local
 task records.
 
 - **Start (once per Codex session)**: same iab tab, `goto`
-  `https://chatgpt.com/?temporary-chat=true`. Verify the chat is actually a
-  Temporary Chat (the UI labels it), and that the connector is available in
-  it — Temporary Chats must be **personalized** for plugins/connectors to
-  appear. Never type anything before both checks pass.
+  `https://chatgpt.com/?temporary-chat=true`. Before sending ANYTHING:
+  choose **Personalized** in the Temporary Chat creation UI (temporary
+  chats start non-personalized, connectors are only available in
+  personalized ones, and this cannot be changed after the chat begins).
+  Then verify the chat shows the Temporary label and the workspace
+  connector is selectable. All three checks — Temporary, Personalized,
+  connector — must pass before the first message.
 - **Smoke gate (mandatory)**: right after the boot prompt, send the
   `workspace_info` check through the connector. If the connector is NOT
   available in the Temporary Chat, fall back deliberately: open a normal
@@ -271,10 +275,13 @@ task records.
   EXECUTED/DONE/BLOCKED record state + summary + next step. This is what a
   replacement chat reconstructs from.
 - **HANDOFF** is only for continuing a NON-terminal task in a replacement
-  chat (previous temp chat lost/closed, or visibly lagging). Send the boot
-  prompt, then a HANDOFF brief reconstructed from `execution_summary`
-  records (goal, progress, current state, known issues, next expected
-  step). A brand-new task needs only Boot Prompt + INIT — no HANDOFF.
+  chat (previous temp chat lost/closed, or visibly lagging). Reconstruct the
+  brief from local records: `c2c record`-backed `execution_summary` with a
+  sufficient limit (e.g. `{"limit": 50}`), filtered to the current
+  `taskId` — the default 5 records can lose the original INIT/goal after
+  several iterations. Send the boot prompt, then the HANDOFF brief (goal,
+  progress, current state, known issues, next expected step). A brand-new
+  task needs only Boot Prompt + INIT — no HANDOFF.
 
 ## Workflow: coding task（"使用 Codex with ChatGPT 完成 XXX"）
 
@@ -329,8 +336,11 @@ Produce a C2C PLAN message.
    "Please expand the plan with rationale and concrete per-file suggestions."
 4. Execute the plan yourself with your own harness (your tools, your judgment;
    ChatGPT does not micro-manage tool calls).
-5. Record the execution so ChatGPT can read it via MCP:
-   `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
+5. Record the execution so ChatGPT can read it via MCP — include the
+   continuity fields at every meaningful transition (INIT recorded goal at
+   step 0):
+   `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok --state EXECUTED --summary "implemented X, tests pass" --next-step "independent diff review"`
+   On DONE/BLOCKED record the terminal state + summary the same way.
 6. Send EXECUTED (no diffs, no logs):
 
 ```

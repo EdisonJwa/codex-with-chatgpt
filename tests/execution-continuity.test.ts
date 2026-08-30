@@ -37,6 +37,39 @@ describe("execution record continuity", () => {
     }
   });
 
+  it("the original goal is still retrievable after more than 5 records", () => {
+    const stateDir = isolateStateDir();
+    try {
+      appendExecutionRecord("ws-long", {
+        taskId: "c2c_long",
+        iteration: 0,
+        changedFiles: 0,
+        tests: null,
+        exitStatus: "ok",
+        timestamp: new Date().toISOString(),
+        state: "INIT",
+        goal: "the original user goal",
+      });
+      for (let i = 1; i <= 8; i++) {
+        appendExecutionRecord("ws-long", {
+          taskId: "c2c_long",
+          iteration: i,
+          changedFiles: i,
+          tests: `${i} passed`,
+          exitStatus: "ok",
+          timestamp: new Date().toISOString(),
+          state: "EXECUTED",
+        });
+      }
+      const wide = readExecutionRecords("ws-long", 50);
+      const init = wide.find((record) => record.state === "INIT");
+      expect(init?.goal).toBe("the original user goal");
+      expect(latestExecutionRecordWithTests("ws-long")?.iteration).toBe(8);
+    } finally {
+      cleanup(path.join(stateDir, "executions"));
+    }
+  });
+
   it("test_status source skips state-only records to find the last real test run", () => {
     const stateDir = isolateStateDir();
     try {

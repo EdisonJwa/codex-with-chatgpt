@@ -102,10 +102,12 @@ function tunnelChoicePayload(workspace: Workspace, zoneHint?: string): Record<st
     machine: effective.machine ?? (effective.error ? { error: effective.error } : null),
     preference: state.preference,
     loggedIn: hasCloudflaredCert(),
-    namedReady: effective.source === "machine" || isNamedTunnelReady(state),
+    namedReady:
+      effective.source === "machine" ? !effective.error : isNamedTunnelReady(state),
     zone,
     hostname: effective.machine?.publicUrl ?? state.hostname ?? null,
     suggestedHostname: zone ? suggestedNamedHostname(zone, workspace.name, workspace.id) : null,
+    machineError: effective.error,
     userPrompt: machineOverride ? undefined : needsTunnelChoice(state) ? TUNNEL_CHOICE_PROMPT : undefined,
     loginPrompt: NAMED_LOGIN_PROMPT,
     fallbackReason: state.fallbackReason,
@@ -140,7 +142,7 @@ interface AdminInfo {
   workspaceRoot: string;
   port: number;
   publicUrl: string | null;
-  tunnel: { running: boolean; url: string | null; provider: string };
+  tunnel: { running: boolean; url: string | null; provider: string; detail?: string };
   tokenCount: number;
   pairingActive: boolean;
   pid: number;
@@ -572,6 +574,17 @@ program
         }
       } else if (machineMalformed) {
         report.tunnel = report.tunnel ?? { ok: false, detail: effective.error! };
+      } else if (namedReady && effective.source === "machine") {
+        // Machine-mode failures (missing credentials, ownership conflicts,
+        // bad tunnel id, cloudflared down) are NOT repaired by a Cloudflare
+        // login — keep the actual error and never funnel into the login flow.
+        const detail =
+          info.tunnel.detail ??
+          (effective.machine ? `machine tunnel ${effective.machine.hostname} is down` : "machine tunnel down");
+        report.tunnel = report.tunnel ?? { ok: false, detail };
+        if (!currentUrl || !healthy) {
+          results.push(`固定地址不可用：${detail}`);
+        }
       } else if (namedReady) {
         report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };
         namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
@@ -593,6 +606,13 @@ program
       }
     } else if (machineMalformed) {
       report.tunnel = { ok: false, detail: effective.error! };
+    } else if (effective.source === "machine") {
+      report.tunnel = {
+        ok: false,
+        detail: effective.machine
+          ? `machine tunnel ${effective.machine.hostname} is down`
+          : "machine tunnel down",
+      };
     } else if (namedReady) {
       report.tunnel = { ok: false, detail: "NAMED_TUNNEL_DOWN" };
       namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
@@ -1067,117 +1087,167 @@ tunnelCmd
     }
   });
 
-tunnelCmd
-  .command("machine-status")
-  .description("Show the machine-wide fixed address configuration (tunnel.json)")
-  .option("--json", "machine-readable output", false)
-  .action((opts: { json: boolean }) => {
-    const read = readMachineTunnel();
-    const payload =
-      read.status === "ok"
-        ? {
-            ok: true,
-            configured: true,
-            publicUrl: read.resolved.publicUrl,
-            hostname: read.resolved.hostname,
-            tunnelName: read.resolved.tunnelName ?? null,
-            tunnelId: read.resolved.tunnelId ?? null,
-            credentialsFile: read.resolved.credentialsFile,
-          }
-        : read.status === "malformed"
-          ? { ok: false, configured: true, error: read.error, file: machineTunnelFile() }
-          : { ok: true, configured: false, file: machineTunnelFile() };
+// Shared actions for the machine-wide fixed address commands. Registered
+// nested under `c2c tunnel machine` with hidden flat aliases for
+// compatibility with the first release.
+
+function machineStatusAction(opts: { json: boolean }): void {
+  const read = readMachineTunnel();
+  const payload =
+    read.status === "ok"
+      ? {
+          ok: true,
+          configured: true,
+          effectiveSource: "machine",
+          publicUrl: read.resolved.publicUrl,
+          hostname: read.resolved.hostname,
+          tunnelName: read.resolved.tunnelName ?? null,
+          tunnelId: read.resolved.tunnelId ?? null,
+          credentialsFile: read.resolved.credentialsFile,
+        }
+      : read.status === "malformed"
+        ? { ok: false, configured: true, error: read.error, file: machineTunnelFile() }
+        : { ok: true, configured: false, file: machineTunnelFile() };
+  if (opts.json) {
+    say(JSON.stringify(payload));
+    return;
+  }
+  if (read.status === "ok") {
+    check(`本机固定地址：${read.resolved.publicUrl}`);
+    if (read.resolved.tunnelName) say(`隧道：${read.resolved.tunnelName}`);
+    say(`凭据：${read.resolved.credentialsFile}`);
+  } else if (read.status === "malformed") {
+    cross(read.error);
+  } else {
+    say("本机未配置固定地址（tunnel.json 不存在）。");
+  }
+}
+
+function machineSetAction(opts: {
+  publicUrl: string;
+  tunnelName?: string;
+  tunnelId?: string;
+  credentialsFile: string;
+  json: boolean;
+}): void {
+  try {
+    let publicUrl: string;
+    let hostname: string;
+    try {
+      const parsed = new URL(opts.publicUrl);
+      if (
+        parsed.protocol !== "https:" ||
+        (parsed.pathname && parsed.pathname !== "/") ||
+        parsed.search ||
+        parsed.hash
+      ) {
+        throw new Error("bad url");
+      }
+      publicUrl = parsed.origin;
+      hostname = parsed.hostname.toLowerCase();
+    } catch {
+      throw new Error("--public-url must be an https base URL without a path, e.g. https://c2c.example.com");
+    }
+    if (!opts.tunnelName && !opts.tunnelId) {
+      throw new Error("Provide --tunnel-name <name> or --tunnel-id <uuid>");
+    }
+    const credentialsFile = path.resolve(opts.credentialsFile);
+    let credentialsOk = false;
+    try {
+      credentialsOk = fs.statSync(credentialsFile).isFile();
+    } catch {
+      credentialsOk = false;
+    }
+    if (!credentialsOk) {
+      throw new Error(`Tunnel credentials file not found: ${credentialsFile}`);
+    }
+    const resolved = parseMachineTunnelConfig({
+      mode: "cloudflare-named",
+      publicUrl,
+      tunnelName: opts.tunnelName,
+      tunnelId: opts.tunnelId,
+      credentialsFile,
+    });
+    if (!resolved) throw new Error("Invalid machine tunnel configuration");
+    writeMachineTunnelConfig({
+      mode: "cloudflare-named",
+      publicUrl: resolved.publicUrl,
+      tunnelName: resolved.tunnelName,
+      tunnelId: resolved.tunnelId,
+      credentialsFile: resolved.credentialsFile,
+    });
+    const payload = {
+      ok: true,
+      effectiveSource: "machine",
+      restartRequired: true,
+      publicUrl: resolved.publicUrl,
+      hostname,
+      credentialsFile: resolved.credentialsFile,
+    };
     if (opts.json) {
       say(JSON.stringify(payload));
       return;
     }
-    if (read.status === "ok") {
-      check(`本机固定地址：${read.resolved.publicUrl}`);
-      if (read.resolved.tunnelName) say(`隧道：${read.resolved.tunnelName}`);
-      say(`凭据：${read.resolved.credentialsFile}`);
-    } else if (read.status === "malformed") {
-      cross(read.error);
-    } else {
-      say("本机未配置固定地址（tunnel.json 不存在）。");
-    }
-  });
+    check(`本机固定地址已保存：${resolved.publicUrl}`);
+    say("正在运行的 Bridge 需要重启后才会使用它（c2c restart -w <workspace> --tunnel）。");
+  } catch (error) {
+    handleCliError(error, opts.json);
+  }
+}
 
-tunnelCmd
-  .command("machine-set")
+function machineUnsetAction(opts: { json: boolean }): void {
+  clearMachineTunnelConfig();
+  const payload = { ok: true, effectiveSource: "unset", restartRequired: true };
+  if (opts.json) {
+    say(JSON.stringify(payload));
+    return;
+  }
+  check("已移除本机固定地址配置（各工作区回到自己的选择或临时地址）。");
+}
+
+const machineCmd = tunnelCmd
+  .command("machine")
+  .description("Show or set the machine-wide fixed address (tunnel.json), overriding per-workspace choice");
+
+machineCmd
+  .command("status")
+  .description("Show the machine-wide fixed address configuration")
+  .option("--json", "machine-readable output", false)
+  .action(machineStatusAction);
+
+machineCmd
+  .command("set")
   .description("Configure the machine-wide fixed address (natively replaces the manual source patch)")
   .requiredOption("--public-url <url>", "fixed public base URL, e.g. https://c2c.example.com")
   .option("--tunnel-name <name>", "named tunnel name")
   .option("--tunnel-id <id>", "named tunnel UUID (preferred run target)")
   .requiredOption("--credentials-file <path>", "tunnel credentials JSON for this tunnel")
   .option("--json", "machine-readable output", false)
-  .action((opts: { publicUrl: string; tunnelName?: string; tunnelId?: string; credentialsFile: string; json: boolean }) => {
-    try {
-      let publicUrl: string;
-      let hostname: string;
-      try {
-        const parsed = new URL(opts.publicUrl);
-        if (parsed.protocol !== "https:" || (parsed.pathname && parsed.pathname !== "/") || parsed.search) {
-          throw new Error("bad url");
-        }
-        publicUrl = parsed.origin;
-        hostname = parsed.hostname.toLowerCase();
-      } catch {
-        throw new Error("--public-url must be an https base URL without a path, e.g. https://c2c.example.com");
-      }
-      if (!opts.tunnelName && !opts.tunnelId) {
-        throw new Error("Provide --tunnel-name <name> or --tunnel-id <uuid>");
-      }
-      const credentialsFile = path.resolve(opts.credentialsFile);
-      if (!fs.existsSync(credentialsFile)) {
-        throw new Error(`Tunnel credentials file not found: ${credentialsFile}`);
-      }
-      const resolved = parseMachineTunnelConfig({
-        mode: "cloudflare-named",
-        publicUrl,
-        tunnelName: opts.tunnelName,
-        tunnelId: opts.tunnelId,
-        credentialsFile,
-      });
-      if (!resolved) throw new Error("Invalid machine tunnel configuration");
-      writeMachineTunnelConfig({
-        mode: "cloudflare-named",
-        publicUrl: resolved.publicUrl,
-        tunnelName: resolved.tunnelName,
-        tunnelId: resolved.tunnelId,
-        credentialsFile: resolved.credentialsFile,
-      });
-      const payload = {
-        ok: true,
-        effectiveSource: "machine",
-        restartRequired: true,
-        publicUrl: resolved.publicUrl,
-        hostname,
-        credentialsFile: resolved.credentialsFile,
-      };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
-      }
-      check(`本机固定地址已保存：${resolved.publicUrl}`);
-      say("正在运行的 Bridge 需要重启后才会使用它（c2c restart -w <workspace> --tunnel）。");
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
+  .action(machineSetAction);
 
-tunnelCmd
-  .command("machine-unset")
+machineCmd
+  .command("unset")
   .description("Remove the machine-wide fixed address; per-workspace choices become effective again")
   .option("--json", "machine-readable output", false)
-  .action((opts: { json: boolean }) => {
-    clearMachineTunnelConfig();
-    const payload = { ok: true, effectiveSource: "unset", restartRequired: true };
-    if (opts.json) {
-      say(JSON.stringify(payload));
-      return;
-    }
-    check("已移除本机固定地址配置（各工作区回到自己的选择或临时地址）。");
-  });
+  .action(machineUnsetAction);
+
+// Hidden flat aliases (first-release compatibility).
+tunnelCmd
+  .command("machine-status", { hidden: true })
+  .option("--json", "machine-readable output", false)
+  .action(machineStatusAction);
+tunnelCmd
+  .command("machine-set", { hidden: true })
+  .requiredOption("--public-url <url>")
+  .option("--tunnel-name <name>")
+  .option("--tunnel-id <id>")
+  .requiredOption("--credentials-file <path>")
+  .option("--json", "machine-readable output", false)
+  .action(machineSetAction);
+tunnelCmd
+  .command("machine-unset", { hidden: true })
+  .option("--json", "machine-readable output", false)
+  .action(machineUnsetAction);
 
 function handleCliError(error: unknown, json: boolean): void {
   const message = error instanceof Error ? error.message : String(error);

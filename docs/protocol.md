@@ -132,7 +132,9 @@ in a replacement chat (the previous temp chat was lost, closed, or visibly
 lagging). Right after the boot prompt, Codex sends a HANDOFF so the new chat
 can continue seamlessly — a brief, never a data dump (the new chat re-reads
 code via MCP), reconstructed from the local execution records
-(`goal`, per-iteration progress, `state`, `summary`, `nextExpectedStep`):
+(`goal`, per-iteration progress, `state`, `summary`, `nextExpectedStep`).
+Pull a sufficient limit (e.g. 50 records) and filter to the current
+`taskId` so the original INIT goal is not lost after several iterations:
 
 ```
 [C2C]

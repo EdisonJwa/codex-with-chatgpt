@@ -46,6 +46,8 @@ export function parseMachineTunnelConfig(value: unknown): ResolvedMachineTunnel 
   if (v.mode !== "cloudflare-named") return null;
   if (typeof v.publicUrl !== "string" || v.publicUrl.trim() === "") return null;
   if (typeof v.credentialsFile !== "string" || v.credentialsFile.trim() === "") return null;
+  // Unsupported future schema versions must fail closed, not half-parse.
+  if (v.version !== undefined && v.version !== 1) return null;
   const hasName = typeof v.tunnelName === "string" && v.tunnelName.trim() !== "";
   const hasId = typeof v.tunnelId === "string" && v.tunnelId.trim() !== "";
   if (!hasName && !hasId) return null;
@@ -54,7 +56,12 @@ export function parseMachineTunnelConfig(value: unknown): ResolvedMachineTunnel 
   let hostname: string;
   try {
     const parsed = new URL(v.publicUrl.trim());
-    if (parsed.protocol !== "https:" || (parsed.pathname && parsed.pathname !== "/") || parsed.search) {
+    if (
+      parsed.protocol !== "https:" ||
+      (parsed.pathname && parsed.pathname !== "/") ||
+      parsed.search ||
+      parsed.hash
+    ) {
       return null;
     }
     publicUrl = parsed.origin;
@@ -67,6 +74,13 @@ export function parseMachineTunnelConfig(value: unknown): ResolvedMachineTunnel 
   const tunnelName = hasName ? (v.tunnelName as string).trim() : undefined;
   const tunnelId = hasId ? (v.tunnelId as string).trim() : undefined;
   const credentialsFile = path.resolve((v.credentialsFile as string).trim());
+  // The credentials file must be a real, readable regular file — not merely
+  // a path that might exist.
+  try {
+    if (!fs.statSync(credentialsFile).isFile()) return null;
+  } catch {
+    return null;
+  }
   // Prefer the tunnel UUID as the run target; the name is display/fallback.
   const target = tunnelId ?? tunnelName!;
   return { hostname, target, tunnelName, tunnelId, credentialsFile, publicUrl };
@@ -76,8 +90,15 @@ export function readMachineTunnel(): MachineTunnelReadResult {
   let text: string;
   try {
     text = fs.readFileSync(machineTunnelFile(), "utf8");
-  } catch {
-    return { status: "absent" };
+  } catch (error) {
+    // Only a missing file means "no machine config". An existing but
+    // unreadable file must fail closed, never silently fall through to
+    // workspace/quick resolution.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "absent" };
+    return {
+      status: "malformed",
+      error: `tunnel.json exists but cannot be read (${(error as Error).message}); fix or remove ${machineTunnelFile()}`,
+    };
   }
   let raw: unknown;
   try {

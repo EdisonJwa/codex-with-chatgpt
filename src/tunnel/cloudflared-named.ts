@@ -208,9 +208,30 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   }
 
   async stop(): Promise<void> {
-    if (this.child) {
-      this.child.kill("SIGTERM");
+    const child = this.child;
+    if (child) {
       this.child = null;
+      const exited = new Promise<void>((resolve) => {
+        child.once("exit", () => resolve());
+        child.once("error", () => resolve());
+      });
+      child.kill("SIGTERM");
+      // The claim must stay held until the connector can no longer route
+      // traffic: releasing before the process actually exits would let
+      // another workspace spawn a second connector for the same hostname
+      // while this one is still up. Bound the graceful wait, then force-kill.
+      const finished = await Promise.race([
+        exited.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000).unref()),
+      ]);
+      if (!finished) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+        await exited.catch(() => undefined);
+      }
     }
     this.connected = false;
     this.releaseClaim();

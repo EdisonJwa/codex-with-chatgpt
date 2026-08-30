@@ -18,7 +18,14 @@ export interface EffectiveTunnelState {
   /** Set when the machine override exists but is invalid — fail closed. */
   error?: string;
   /** Set for source "machine": the resolved fixed-address details. */
-  machine?: { hostname: string; target: string; publicUrl: string; credentialsFile: string };
+  machine?: {
+    hostname: string;
+    target: string;
+    tunnelName?: string;
+    tunnelId?: string;
+    publicUrl: string;
+    credentialsFile: string;
+  };
 }
 
 /**
@@ -36,6 +43,8 @@ export function effectiveTunnelState(workspaceId: string): EffectiveTunnelState 
       machine: {
         hostname: machine.resolved.hostname,
         target: machine.resolved.target,
+        tunnelName: machine.resolved.tunnelName,
+        tunnelId: machine.resolved.tunnelId,
         publicUrl: machine.resolved.publicUrl,
         credentialsFile: machine.resolved.credentialsFile,
       },
@@ -62,15 +71,14 @@ export function resolveTunnelProvider(
     throw new Error(effective.error);
   }
   if (effective.source === "machine" && effective.machine) {
-    const { hostname, target, publicUrl, credentialsFile } = effective.machine;
-    const tunnelId = /^[0-9a-f-]{36}$/i.test(target) ? target : undefined;
+    const machine = effective.machine;
     return {
       source: "machine",
       provider: new CloudflaredNamedTunnel({
-        hostname,
-        tunnelId,
-        tunnelName: tunnelId ? undefined : target,
-        credentialsFile,
+        hostname: machine.hostname,
+        tunnelId: machine.tunnelId,
+        tunnelName: machine.tunnelName,
+        credentialsFile: machine.credentialsFile,
         logger,
         owner: owner ?? { pid: process.pid, workspaceId },
       }),

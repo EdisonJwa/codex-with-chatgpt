@@ -109,7 +109,10 @@ export function acquireTunnelOwnership(
           `(${file}). If no bridge is running, remove that file and retry.`
       );
     }
-    if (holder && holder.pid !== owner.pid && pidAlive(holder.pid)) {
+    // ANY live holder pid is a live claim — including our own pid, which
+    // means this process already holds the claim and must not fall through
+    // to the stale-branch message below.
+    if (holder && (holder.pid === owner.pid || pidAlive(holder.pid))) {
       throw new Error(
         `The fixed address ${publicUrl} is currently served by ` +
           `workspace ${holder.workspaceId} (pid ${holder.pid}). Only one bridge may ` +

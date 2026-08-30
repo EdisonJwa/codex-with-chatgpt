@@ -61,6 +61,22 @@ describe("tunnel ownership", () => {
     }
   });
 
+  it("a live same-PID holder counts as live, not stale", () => {
+    const stateDir = isolateStateDir();
+    try {
+      const first = acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-a" }, "https://c2c-a.example.com");
+      // Same process claims again (e.g. two provider instances in one bridge):
+      // the recorded pid IS alive, so this is a live-holder conflict, never
+      // the "no longer running" stale branch.
+      expect(() =>
+        acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-a" }, "https://c2c-a.example.com")
+      ).toThrow(/currently served by/);
+      first.release();
+    } finally {
+      cleanup(path.join(stateDir, "runtime", "tunnels"));
+    }
+  });
+
   it("release frees the claim for the next bridge", () => {
     const stateDir = isolateStateDir();
     try {

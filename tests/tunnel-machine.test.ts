@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { startBridge } from "../src/bridge/server.js";
@@ -15,24 +15,34 @@ import { writeTunnelState } from "../src/tunnel/state.js";
 import { buildNamedRunArgs, CloudflaredNamedTunnel } from "../src/tunnel/cloudflared-named.js";
 import { nullLogger } from "../src/logger/index.js";
 
-const GOOD = {
-  mode: "cloudflare-named" as const,
-  publicUrl: "https://c2c.example.com",
-  tunnelName: "Edison-PC",
-  tunnelId: "b42367b0-4892-4dbe-a3c2-279e6de880f4",
-  credentialsFile: "C:\\fake\\edison-pc.json",
-};
-
 describe("machine tunnel config", () => {
+  let credsDir: string;
+  let credsFile: string;
+
+  const good = () => ({
+    mode: "cloudflare-named" as const,
+    publicUrl: "https://c2c.example.com",
+    tunnelName: "Edison-PC",
+    tunnelId: "b42367b0-4892-4dbe-a3c2-279e6de880f4",
+    credentialsFile: credsFile,
+  });
+
+  beforeAll(() => {
+    // Parsing validates the credentials file is a real readable file.
+    credsDir = makeTmpDir("machine-creds");
+    credsFile = write(credsDir, "edison-pc.json", "{}");
+  });
+
   afterAll(() => {
     clearMachineTunnelConfig();
+    cleanup(credsDir);
   });
 
   it("parses a valid config, preferring the tunnel UUID as run target", () => {
-    const resolved = parseMachineTunnelConfig({ version: 1, ...GOOD });
+    const resolved = parseMachineTunnelConfig({ version: 1, ...good() });
     expect(resolved).not.toBeNull();
     expect(resolved!.hostname).toBe("c2c.example.com");
-    expect(resolved!.target).toBe(GOOD.tunnelId);
+    expect(resolved!.target).toBe(good().tunnelId);
     expect(resolved!.publicUrl).toBe("https://c2c.example.com");
   });
 
@@ -41,18 +51,32 @@ describe("machine tunnel config", () => {
       mode: "cloudflare-named",
       publicUrl: "https://c2c.example.com/",
       tunnelName: "my-laptop",
-      credentialsFile: "/tmp/c.json",
+      credentialsFile: credsFile,
     });
     expect(nameOnly!.target).toBe("my-laptop");
-    // http, paths, missing targets, wrong mode, empty url — all invalid
+    // http, paths, fragments, missing targets, wrong mode, bad creds — all invalid
     expect(
-      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "http://c2c.example.com", tunnelName: "x", credentialsFile: "c" })
+      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "http://c2c.example.com", tunnelName: "x", credentialsFile: credsFile })
     ).toBeNull();
     expect(
-      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "https://c2c.example.com/a/b", tunnelName: "x", credentialsFile: "c" })
+      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "https://c2c.example.com/a/b", tunnelName: "x", credentialsFile: credsFile })
     ).toBeNull();
-    expect(parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "https://c2c.example.com", credentialsFile: "c" })).toBeNull();
-    expect(parseMachineTunnelConfig({ mode: "quick", publicUrl: "https://c2c.example.com", tunnelName: "x", credentialsFile: "c" })).toBeNull();
+    expect(
+      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "https://c2c.example.com/#frag", tunnelName: "x", credentialsFile: credsFile })
+    ).toBeNull();
+    expect(
+      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "https://c2c.example.com", credentialsFile: credsFile })
+    ).toBeNull();
+    expect(
+      parseMachineTunnelConfig({ mode: "quick", publicUrl: "https://c2c.example.com", tunnelName: "x", credentialsFile: credsFile })
+    ).toBeNull();
+    // credentials file must really exist and be a regular file
+    expect(
+      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "https://c2c.example.com", tunnelName: "x", credentialsFile: credsDir })
+    ).toBeNull();
+    expect(
+      parseMachineTunnelConfig({ mode: "cloudflare-named", publicUrl: "https://c2c.example.com", tunnelName: "x", credentialsFile: path.join(credsDir, "nope.json") })
+    ).toBeNull();
   });
 
   it("absent vs malformed vs ok reads fail closed, never silently quick", () => {
@@ -65,12 +89,27 @@ describe("machine tunnel config", () => {
       if (malformed.status === "malformed") {
         expect(malformed.error).toContain(machineTunnelFile());
       }
-      writeMachineTunnelConfig(GOOD);
+      writeMachineTunnelConfig(good());
       expect(readMachineTunnel().status).toBe("ok");
       clearMachineTunnelConfig();
       expect(readMachineTunnel().status).toBe("absent");
     } finally {
       cleanup(path.join(stateDir, "runtime", "tunnels"));
+    }
+  });
+
+  it("an existing but unreadable tunnel.json fails closed (EISDIR is not absent)", () => {
+    const stateDir = isolateStateDir();
+    try {
+      // a DIRECTORY at the config path: readFileSync throws EISDIR
+      fs.mkdirSync(path.join(stateDir, "tunnel.json"));
+      const read = readMachineTunnel();
+      expect(read.status).toBe("malformed");
+      if (read.status === "malformed") {
+        expect(read.error).toContain("cannot be read");
+      }
+    } finally {
+      cleanup(path.join(stateDir, "tunnel.json"));
     }
   });
 
@@ -90,7 +129,7 @@ describe("machine tunnel config", () => {
       });
       expect(effectiveTunnelState(ws).source).toBe("workspace");
       // machine override wins
-      writeMachineTunnelConfig(GOOD);
+      writeMachineTunnelConfig(good());
       expect(effectiveTunnelState(ws).source).toBe("machine");
       const { provider } = resolveTunnelProvider(ws, nullLogger);
       expect(provider.name).toBe("cloudflare-named");
@@ -118,7 +157,7 @@ describe("machine tunnel config", () => {
     const stateDir = isolateStateDir();
     const root = makeTmpDir("machine-ws");
     write(root, "hello.txt", "hello\n");
-    writeMachineTunnelConfig(GOOD);
+    writeMachineTunnelConfig(good());
     const bridge = await startBridge({ workspaceRoot: root, port: 0, persistRuntime: false });
     try {
       const auth = { authorization: `Bearer ${bridge.adminToken}` };
@@ -139,11 +178,11 @@ describe("generalized named provider", () => {
     const args = buildNamedRunArgs({
       target: "b42367b0-4892-4dbe-a3c2-279e6de880f4",
       localPort: 48765,
-      credentialsFile: "C:\fake\edison-pc.json",
+      credentialsFile: "C:/fake/edison-pc.json",
     });
     expect(args).toContain("--credentials-file");
     expect(args.indexOf("--credentials-file")).toBeLessThan(args.indexOf("run"));
-    expect(args[args.indexOf("--credentials-file") + 1]).toBe("C:\fake\edison-pc.json");
+    expect(args[args.indexOf("--credentials-file") + 1]).toBe("C:/fake/edison-pc.json");
     expect(args[args.length - 1]).toBe("b42367b0-4892-4dbe-a3c2-279e6de880f4");
   });
 
