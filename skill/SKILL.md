@@ -254,13 +254,13 @@ local. There is no saved conversation URL — continuity comes from the local
 task records.
 
 - **Start (once per Codex session)**: same iab tab, `goto`
-  `https://chatgpt.com/?temporary-chat=true`. Before sending ANYTHING:
-  choose **Personalized** in the Temporary Chat creation UI (temporary
-  chats start non-personalized, connectors are only available in
-  personalized ones, and this cannot be changed after the chat begins).
-  Then verify the chat shows the Temporary label and the workspace
-  connector is selectable. All three checks — Temporary, Personalized,
-  connector — must pass before the first message.
+  `https://chatgpt.com/?temporary-chat=true`. Temporary chats start
+  **non-personalized** (plugins unavailable, and it cannot be changed
+  after the first message), so BEFORE typing anything: click the
+  非个性化 button in the top banner and select **个性化**
+  (Personalized — "此聊天可参考记忆、插件和自定义指令"). Then verify all
+  three: Temporary label, Personalized mode, workspace connector
+  selectable.
 - **Smoke gate (mandatory)**: right after the boot prompt, send the
   `workspace_info` check through the connector. If the connector is NOT
   available in the Temporary Chat, fall back deliberately: open a normal
