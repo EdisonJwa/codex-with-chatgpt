@@ -31,10 +31,14 @@
 ## Principles
 
 - **ChatGPT thinks. Codex works.** The bridge never re-implements a coding harness.
-- **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
+- **In-app browser = control plane**: tiny `[C2C]` state messages (< 1 KB),
+  exchanged in personalized Temporary Chats (no persisted conversation URLs).
 - **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
 - **Read-only by design**: no write/exec tools exist in V1 at all.
 - **Workspace is the security boundary**: one bridge = one workspace = one token audience.
+- **One connector per hostname**: a fixed hostname is claimed machine-wide by
+  a single bridge, so Cloudflare can never round-robin requests onto the
+  wrong workspace.
 
 ## Components (src/)
 
@@ -45,7 +49,7 @@
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
-| `tunnel/` | `TunnelProvider` interface + Cloudflare Quick and workspace-configured Named Tunnel implementations; business logic is vendor-agnostic |
+| `tunnel/` | `TunnelProvider` interface + Cloudflare Quick and Named Tunnel providers; machine-level `tunnel.json` override resolved as machine > workspace > quick (malformed machine config fails closed). A machine-wide ownership claim (`runtime/tunnels/<hostname-hash>.lock`) lets exactly one bridge run the connector for a given hostname: conflicting starts fail with an actionable error naming the holder, and stale claims fail closed with manual remediation — never auto-reclaimed |
 | `execution/` | JSONL execution records written by `c2c record`, read by `execution_summary` / `test_status` |
 | `process/` | Daemon spawn/reuse, health probing, graceful shutdown |
 | `cli/` | `c2c` commands; `--json` everywhere for the Skill |

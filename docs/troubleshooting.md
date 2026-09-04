@@ -44,6 +44,14 @@ login, then keeps `c2c-<project>.your-domain.com`. To stay on the temporary
 address, say you do not have a domain. Switching later: tell Codex you want
 the stable hostname; it runs `c2c tunnel choose --mode named --zone <domain>`.
 
+### "The fixed address ... is currently served by workspace ..."
+Hostnames are chosen per workspace, but two workspaces can still derive the
+same one (identical project names, a `--hostname` override used twice). A
+machine-wide ownership claim refuses the second connector instead of letting
+Cloudflare round-robin requests onto the wrong workspace (401 → re-pair
+loop). To move the hostname: run `c2c stop` in the workspace that
+currently holds it, then start the tunnel in the other one.
+
 ### "配对码无效/过期"
 Pairing codes are one-time and expire after ~5 minutes:
 
@@ -64,6 +72,8 @@ macOS: `brew install cloudflared`
 Windows: `winget install Cloudflare.cloudflared`
 Linux: see Cloudflare's package instructions.
 The Skill installs this automatically during setup.
+If cloudflared is installed in a custom location that is not on `PATH`, set
+`C2C_CLOUDFLARED_PATH` to the executable's absolute path before running `c2c`.
 
 ### Every new Codex chat “repairs” the connection / cannot write logs
 The C2C state directory lives outside the project (macOS:

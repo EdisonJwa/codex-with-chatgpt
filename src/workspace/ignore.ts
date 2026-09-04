@@ -91,10 +91,18 @@ export class IgnoreRules {
     }
   }
 
-  /** True when the path must be denied with ACCESS_DENIED_SENSITIVE_FILE. */
+  /**
+   * True when the path must be denied with ACCESS_DENIED_SENSITIVE_FILE.
+   * Built-in sensitive matching is CASE-INSENSITIVE (`.Env`, `ID_RSA` and
+   * `Secrets.JSON` are the same files on Windows/macOS filesystems);
+   * user `.c2cignore` rules stay case-sensitive gitignore semantics.
+   */
   isSensitive(relPath: string): boolean {
     if (!relPath || relPath === ".") return false;
-    return this.sensitive.ignores(relPath) || this.custom.ignores(relPath);
+    if (this.sensitive.ignores(relPath) || this.sensitive.ignores(relPath.toLowerCase())) {
+      return true;
+    }
+    return this.custom.ignores(relPath);
   }
 
   /** True when the path should be hidden from listing/search (not an error). */

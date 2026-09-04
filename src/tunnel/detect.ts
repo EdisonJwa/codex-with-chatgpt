@@ -11,8 +11,14 @@ const COMMON_DIRS = [
   "C:\\Program Files (x86)\\cloudflared",
 ];
 
-/** Locate a binary on PATH or in common install locations. */
+/**
+ * Locate a binary on PATH or in common install locations.
+ * `C2C_<NAME>_PATH` (e.g. C2C_CLOUDFLARED_PATH) wins outright — an explicit
+ * override must never be silently second-guessed by auto-detection.
+ */
 export function findBinary(name: string): string | null {
+  const override = process.env[`C2C_${name.toUpperCase()}_PATH`]?.trim();
+  if (override) return override;
   const exe = process.platform === "win32" ? `${name}.exe` : name;
   try {
     const probe = spawnSync(exe, ["--version"], { stdio: "ignore", timeout: 5000 });

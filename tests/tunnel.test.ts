@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { parseQuickTunnelUrl } from "../src/tunnel/cloudflared.js";
+import { createServer, type Server } from "node:http";
+import { parseQuickTunnelUrl, verifyTunnelServesHost } from "../src/tunnel/cloudflared.js";
+import { findBinary } from "../src/tunnel/detect.js";
+import { SERVICE_NAME } from "../src/version.js";
 import { normalizeNamedTunnelHostname } from "../src/tunnel/cloudflared-named.js";
 import { hostnameSlug, parseZoneInput, suggestedNamedHostname } from "../src/tunnel/hostname.js";
 import {
@@ -36,6 +39,63 @@ describe("parseQuickTunnelUrl", () => {
 
   it("does not match non-trycloudflare hosts", () => {
     expect(parseQuickTunnelUrl("https://evil.example.com/trycloudflare.com")).toBeNull();
+  });
+
+  it("never returns cloudflared's own API host as a tunnel URL (fail-closed #92)", () => {
+    expect(parseQuickTunnelUrl("INF Registering tunnel at https://api.trycloudflare.com")).toBeNull();
+    expect(parseQuickTunnelUrl("https://api.trycloudflare.com")).toBeNull();
+    // a genuine random subdomain that merely contains "api" still works
+    expect(parseQuickTunnelUrl("https://api-gateway-1a2b.trycloudflare.com")).toBe(
+      "https://api-gateway-1a2b.trycloudflare.com"
+    );
+  });
+});
+
+describe("verifyTunnelServesHost (fail-closed startup)", () => {
+  let server: Server | null = null;
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    server = null;
+  });
+
+  function healthServer(body: unknown): Promise<number> {
+    return new Promise((resolve) => {
+      server = createServer((_req, res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify(body));
+      });
+      server.listen(0, "127.0.0.1", () => {
+        resolve((server!.address() as { port: number }).port);
+      });
+    });
+  }
+
+  it("confirms when /health identifies this service", async () => {
+    const port = await healthServer({ service: SERVICE_NAME, status: "ok" });
+    expect(await verifyTunnelServesHost(`http://127.0.0.1:${port}`, { timeoutMs: 3_000 })).toBe(true);
+  });
+
+  it("rejects when /health identifies a different service", async () => {
+    const port = await healthServer({ service: "something-else" });
+    expect(await verifyTunnelServesHost(`http://127.0.0.1:${port}`, { timeoutMs: 1_500 })).toBe(false);
+  });
+
+  it("rejects when the URL is unreachable (edge not ready yet)", async () => {
+    expect(await verifyTunnelServesHost("http://127.0.0.1:9", { timeoutMs: 1_500 })).toBe(false);
+  });
+});
+
+describe("binary detection overrides", () => {
+  it("C2C_<NAME>_PATH wins outright over auto-detection", () => {
+    const previous = process.env.C2C_CLOUDFLARED_PATH;
+    try {
+      process.env.C2C_CLOUDFLARED_PATH = "D:/tools/cloudflared-custom.exe";
+      expect(findBinary("cloudflared")).toBe("D:/tools/cloudflared-custom.exe");
+    } finally {
+      if (previous === undefined) delete process.env.C2C_CLOUDFLARED_PATH;
+      else process.env.C2C_CLOUDFLARED_PATH = previous;
+    }
   });
 });
 
