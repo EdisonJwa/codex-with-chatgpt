@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, getStateDir } from "../config/paths.js";
+import { pruneJsonl, type PruneResult, type RetentionPolicy } from "./jsonl.js";
 
 /**
  * Lightweight execution records written by the Codex harness (via `c2c
@@ -28,6 +29,23 @@ export interface ExecutionRecord {
   summary?: string;
   /** What the next iteration/chat is expected to do next. */
   nextExpectedStep?: string;
+  /** Which agent tool produced this record (multi-tool workspaces). */
+  tool?: string;
+  /**
+   * Optional human-readable label alongside the hex taskId — easier for
+   * ChatGPT to reference in conversation and for humans to grep in `c2c logs`.
+   */
+  slug?: string;
+}
+
+/** Records are continuity state, not archives: 30 days / newest 500 wins. */
+export const EXECUTION_RETENTION: RetentionPolicy = {
+  maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+  maxRecords: 500,
+};
+
+export function pruneExecutionRecords(workspaceId: string, policy: RetentionPolicy = EXECUTION_RETENTION): PruneResult {
+  return pruneJsonl(recordsFile(workspaceId), policy);
 }
 
 function recordsFile(workspaceId: string): string {

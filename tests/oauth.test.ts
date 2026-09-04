@@ -1,30 +1,32 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import path from "node:path";
-import { startBridge, type Bridge } from "../src/bridge/server.js";
-import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge } from "./helpers.js";
+import type { Host } from "../src/host/server.js";
+import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge, startTestHost } from "./helpers.js";
 
 let root: string;
-let bridge: Bridge;
+let stateDir: string;
+let host: Host;
 let base: string;
 
 const REDIRECT_URI = "http://127.0.0.1:19999/callback";
 
+function ws() {
+  const context = host.registry.list()[0];
+  if (!context) throw new Error("no workspace registered on host");
+  return context;
+}
+
 beforeAll(async () => {
-  isolateStateDir();
+  stateDir = isolateStateDir();
   root = makeTmpDir("oauth-ws");
   write(root, "hello.txt", "hello oauth\n");
-  bridge = await startBridge({
-    workspaceRoot: root,
-    port: 0,
-    persistRuntime: false,
-    authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
-  });
-  base = bridge.localBaseUrl();
+  host = await startTestHost({ workspaceRoot: root });
+  base = `http://127.0.0.1:${host.port}`;
 });
 
 afterAll(async () => {
-  await bridge.close();
+  await host.close();
   cleanup(root);
+  cleanup(stateDir);
 });
 
 async function registerClient(): Promise<string> {
@@ -113,7 +115,7 @@ describe("authorization + token flow", () => {
   it("completes the full pairing + PKCE flow and calls MCP", async () => {
     const clientId = await registerClient();
     const { verifier, challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = ws().pairing.create();
     const { code, location } = await authorizeWithPairing(clientId, challenge, pairing.code);
     expect(code).toBeTruthy();
     expect(location).toContain("state=st-123");
@@ -145,7 +147,7 @@ describe("authorization + token flow", () => {
   it("rejects a wrong pairing code", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
-    bridge.pairing.create();
+    ws().pairing.create();
     const result = await authorizeWithPairing(clientId, challenge, "AAAA-AAAA");
     expect(result.code).toBeNull();
     expect(result.status).toBe(401);
@@ -155,7 +157,7 @@ describe("authorization + token flow", () => {
   it("rejects PKCE verifier mismatch", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = ws().pairing.create();
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
     const token = await exchangeToken(clientId, code!, "wrong-verifier-wrong-verifier-wrong");
     expect(token.status).toBe(400);
@@ -165,7 +167,7 @@ describe("authorization + token flow", () => {
   it("authorization codes are one-time", async () => {
     const clientId = await registerClient();
     const { verifier, challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = ws().pairing.create();
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
     const first = await exchangeToken(clientId, code!, verifier);
     expect(first.status).toBe(200);
@@ -218,7 +220,7 @@ describe("token enforcement on /mcp", () => {
   });
 
   it("401 with an expired token", async () => {
-    const expired = bridge.authStore.issueTokens({
+    const expired = ws().authStore.issueTokens({
       clientId: "test",
       scopes: ["workspace.read"],
       accessTtlMs: -1000,
@@ -227,20 +229,20 @@ describe("token enforcement on /mcp", () => {
     expect(response.status).toBe(401);
   });
 
-  it("403 with a token bound to another workspace", async () => {
-    const foreign = bridge.authStore.issueTokens({
+  it("403 with a token bound to another deployment (resource mismatch)", async () => {
+    const foreign = ws().authStore.issueTokens({
       clientId: "test",
       scopes: ["workspace.read"],
-      workspaceId: "deadbeef0000",
+      resource: "https://other-deployment.example.com/mcp",
     });
     const response = await mcpCall(foreign.accessToken);
     expect(response.status).toBe(403);
   });
 
   it("401 after revocation", async () => {
-    const tokens = bridge.authStore.issueTokens({ clientId: "test", scopes: ["workspace.read"] });
+    const tokens = ws().authStore.issueTokens({ clientId: "test", scopes: ["workspace.read"] });
     expect((await mcpCall(tokens.accessToken)).status).toBe(200);
-    bridge.authStore.revokeToken(tokens.accessToken);
+    ws().authStore.revokeToken(tokens.accessToken);
     expect((await mcpCall(tokens.accessToken)).status).toBe(401);
   });
 });
@@ -249,7 +251,7 @@ describe("refresh token rotation", () => {
   it("rotates refresh tokens and invalidates the old one", async () => {
     const clientId = await registerClient();
     const { verifier, challenge } = pkceVerifierAndChallenge();
-    const pairing = bridge.pairing.create();
+    const pairing = ws().pairing.create();
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
     const initial = await exchangeToken(clientId, code!, verifier);
 

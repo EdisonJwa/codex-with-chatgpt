@@ -1,8 +1,7 @@
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { startBridge } from "../src/bridge/server.js";
-import { makeTmpDir, cleanup, write, isolateStateDir } from "./helpers.js";
+import { makeTmpDir, cleanup, write, isolateStateDir, testPort } from "./helpers.js";
 import {
   clearMachineTunnelConfig,
   machineTunnelFile,
@@ -159,22 +158,24 @@ describe("machine tunnel config", () => {
     }
   });
 
-  it("a workspace bridge resolves the machine provider without any patch", async () => {
+  it("the machine host resolves the machine provider without any patch", async () => {
     const stateDir = isolateStateDir();
     const root = makeTmpDir("machine-ws");
     write(root, "hello.txt", "hello\n");
     writeMachineTunnelConfig(good());
-    const bridge = await startBridge({ workspaceRoot: root, port: 0, persistRuntime: false });
+    const { startTestHost } = await import("./helpers.js");
+    const host = await startTestHost({ workspaceRoot: root, realTunnel: true });
     try {
-      const auth = { authorization: `Bearer ${bridge.adminToken}` };
+      const auth = { authorization: `Bearer ${host.adminToken}` };
       const info = (await (
-        await fetch(`${bridge.localBaseUrl()}/admin/info`, { headers: auth })
+        await fetch(`http://127.0.0.1:${host.port}/admin/info`, { headers: auth })
       ).json()) as { tunnel: { provider: string } };
       expect(info.tunnel.provider).toBe("cloudflare-named");
     } finally {
-      await bridge.close();
+      await host.close();
       cleanup(root);
       clearMachineTunnelConfig();
+      cleanup(path.join(stateDir));
     }
   });
 });

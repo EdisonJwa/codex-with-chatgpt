@@ -64,6 +64,53 @@ export function isolateStateDir(): string {
   return dir;
 }
 
+/**
+ * Tunnel stub for host tests: boots the host with zero tunnel side effects
+ * (no cloudflared spawn, no machine config reads).
+ */
+export const nullTunnel = {
+  name: "null",
+  start: async () => null as unknown as string,
+  stop: async () => undefined,
+  restart: async () => null as unknown as string,
+  status: () => ({ running: false, url: null, provider: "null" }),
+  getPublicUrl: () => null,
+  doctor: async () => ({ provider: "null", binaryFound: false, binaryPath: null, running: false, url: null, problems: [] }),
+};
+
+/** Distinct high port per test file so parallel vitest workers never collide. */
+export function testPort(offset = 0): number {
+  return 47_000 + (Math.floor(Math.random() * 2_000) + offset) % 2_000;
+}
+
+/**
+ * Start an isolated host for tests, retrying on port collision. Parallel
+ * vitest workers draw from the same port range; a collision must not flake
+ * the suite — the next attempt simply picks a different port.
+ */
+export async function startTestHost(opts: {
+  workspaceRoot: string;
+  /** Persist host state (default false — tests never write host.json). */
+  persist?: boolean;
+  /** Resolve the REAL machine/quick tunnel config instead of the null stub. */
+  realTunnel?: boolean;
+}): Promise<import("../src/host/server.js").Host> {
+  const { startHost, PortInUseError } = await import("../src/host/server.js");
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await startHost({
+        workspaceRoot: opts.workspaceRoot,
+        port: testPort(attempt),
+        persist: opts.persist ?? false,
+        tunnelProvider: opts.realTunnel ? undefined : nullTunnel,
+      });
+    } catch (error) {
+      if (error instanceof PortInUseError && attempt < 5) continue;
+      throw error;
+    }
+  }
+}
+
 export function pkceVerifierAndChallenge(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");

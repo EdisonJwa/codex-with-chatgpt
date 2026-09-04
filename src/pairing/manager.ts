@@ -111,6 +111,28 @@ export class PairingManager {
     return entry.count <= this.ipRateLimit;
   }
 
+  /**
+   * Non-mutating lookup: does this code belong to one of MY active sessions?
+   * The shared host routes a code to its workspace WITHOUT burning attempts
+   * or rate budget; the winning manager then destructively verifies.
+   */
+  match(codeInput: string): { sessionId: string } | null {
+    const normalized = normalizePairingCode(codeInput);
+    const inputHash = hashCode(normalized);
+    const now = Date.now();
+    for (const [id, session] of this.sessions) {
+      if (session.used) continue;
+      if (now > session.expiresAt) {
+        this.sessions.delete(id);
+        continue;
+      }
+      if (timingSafeEqual(inputHash, session.codeHash)) {
+        return { sessionId: id };
+      }
+    }
+    return null;
+  }
+
   verify(codeInput: string, ip?: string): PairingVerifyResult {
     if (!this.checkIpRate(ip)) {
       return { ok: false, reason: "rate_limited" };
