@@ -60,7 +60,13 @@ export interface GitStatusResult {
   conflicted: string[];
 }
 
-export function gitStatus(root: string): GitStatusResult {
+/**
+ * git_status with NUL-delimited porcelain v2 parsing (filenames with spaces
+ * or special characters are safe) and a sensitive-path filter: a file the
+ * MCP read path would deny (and either side of a sensitive rename) never
+ * appears in the listing.
+ */
+export function gitStatus(root: string, isSensitive?: (relPath: string) => boolean): GitStatusResult {
   const empty: GitStatusResult = {
     isRepo: false,
     branch: null,
@@ -72,35 +78,82 @@ export function gitStatus(root: string): GitStatusResult {
     untracked: [],
     conflicted: [],
   };
-  const result = runGit(root, ["status", "--porcelain=v2", "--branch", "--", "."]);
+  const result = runGit(root, ["status", "--porcelain=v2", "--branch", "-z", "--", "."]);
   if (!result.ok) return empty;
   const out: GitStatusResult = { ...empty, isRepo: true };
-  for (const line of result.stdout.split("\n")) {
-    if (line.startsWith("# branch.head ")) {
-      out.branch = line.slice("# branch.head ".length).trim();
-    } else if (line.startsWith("# branch.upstream ")) {
-      out.upstream = line.slice("# branch.upstream ".length).trim();
-    } else if (line.startsWith("# branch.ab ")) {
-      const m = line.match(/\+(\d+) -(\d+)/);
-      if (m) {
-        out.ahead = parseInt(m[1], 10);
-        out.behind = parseInt(m[2], 10);
+
+  // With -z every record is ONE NUL-terminated field and paths are inline
+  // (space-separated, unquoted). The only exception: a rename ("2") record
+  // carries its old path as a SECOND NUL-terminated field.
+  const records: string[][] = [];
+  for (const field of result.stdout.split("\0")) {
+    if (field === "") continue;
+    if (/^[#12u?]/.test(field[0]) && (field[1] === " " || field.length === 1)) {
+      records.push([field]);
+    } else if (records.length > 0) {
+      records[records.length - 1].push(field); // old path following a "2" record
+    }
+  }
+
+  const denied = (relPath: string): boolean =>
+    typeof isSensitive === "function" ? isSensitive(relPath) : false;
+
+  /** The path = every space-separated token after the record's fixed fields. */
+  const pathAfter = (header: string, fixedFields: number): string =>
+    header.split(" ").slice(fixedFields).join(" ");
+
+  for (const fields of records) {
+    const header = fields[0];
+    const kind = header[0];
+    if (kind === "#") {
+      if (header.startsWith("# branch.head ")) {
+        out.branch = header.slice("# branch.head ".length).trim();
+      } else if (header.startsWith("# branch.upstream ")) {
+        out.upstream = header.slice("# branch.upstream ".length).trim();
+      } else if (header.startsWith("# branch.ab ")) {
+        const m = header.match(/\+(\d+) -(\d+)/);
+        if (m) {
+          out.ahead = parseInt(m[1], 10);
+          out.behind = parseInt(m[2], 10);
+        }
       }
-    } else if (line.startsWith("1 ") || line.startsWith("2 ")) {
-      const parts = line.split(" ");
-      const xy = parts[1];
-      const filePath = line.startsWith("2 ")
-        ? line.split("\t")[0]?.split(" ").slice(9).join(" ") + " -> " + (line.split("\t")[1] ?? "")
-        : parts.slice(8).join(" ");
+      continue;
+    }
+    if (kind === "1") {
+      // 1 XY sub mH mI mW hH hI path
+      const xy = header.split(" ")[1];
+      const relPath = pathAfter(header, 8);
+      if (denied(relPath)) continue;
       const x = xy[0];
       const y = xy[1];
-      if (x !== ".") out.staged.push({ path: filePath, change: x });
-      if (y !== ".") out.unstaged.push({ path: filePath, change: y });
-    } else if (line.startsWith("? ")) {
-      out.untracked.push(line.slice(2));
-    } else if (line.startsWith("u ")) {
-      const parts = line.split(" ");
-      out.conflicted.push(parts.slice(10).join(" "));
+      if (x !== ".") out.staged.push({ path: relPath, change: x });
+      if (y !== ".") out.unstaged.push({ path: relPath, change: y });
+      continue;
+    }
+    if (kind === "2") {
+      // 2 XY sub mH mI mW hH hI X score newPath, old path in fields[1]
+      const xy = header.split(" ")[1];
+      const newPath = pathAfter(header, 10);
+      const oldPath = fields[1] ?? "";
+      // A sensitive->safe or safe->sensitive rename reveals neither filename.
+      if (denied(newPath) || denied(oldPath)) continue;
+      const display = oldPath ? `${newPath} -> ${oldPath}` : newPath;
+      const x = xy[0];
+      const y = xy[1];
+      if (x !== ".") out.staged.push({ path: display, change: x });
+      if (y !== ".") out.unstaged.push({ path: display, change: y });
+      continue;
+    }
+    if (kind === "?") {
+      const relPath = pathAfter(header, 1);
+      if (!denied(relPath)) out.untracked.push(relPath);
+      continue;
+    }
+    if (kind === "u") {
+      // u XY sub m1 m2 m3 mW h1 h2 h3 path
+      const relPath = pathAfter(header, 10);
+      if (!denied(relPath)) out.conflicted.push(relPath);
+      continue;
     }
   }
   return out;
