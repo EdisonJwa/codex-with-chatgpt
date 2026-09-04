@@ -118,6 +118,11 @@ describe("tunnel ownership", () => {
           queueMicrotask(() => fake.stdout.end("Registered tunnel connection\n"));
           return fake;
         },
+        // Fail-closed verification passes instantly against this stub.
+        fetchImpl: (async () => ({
+          ok: true,
+          json: async () => ({ service: "c2c-bridge" }),
+        })) as unknown as typeof fetch,
         owner: { pid: process.pid, workspaceId: "ws-holder" },
       });
 
@@ -146,29 +151,33 @@ describe("tunnel ownership", () => {
     }
   });
 
-  it("a stale claim fails closed with manual remediation instead of self-healing", async () => {
+  it("a stale claim (dead holder) is reclaimed atomically after a crash", async () => {
     const stateDir = isolateStateDir();
     const crashed = spawnSleeper();
     try {
-      const stale = acquireTunnelOwnership("my-laptop", { pid: crashed.pid, workspaceId: "ws-a" }, "https://c2c-a.example.com");
-      stale.release();
-      // Leave a claim behind whose holder then dies (simulated crash — this
-      // claim is never released).
       const holder = acquireTunnelOwnership("my-laptop", { pid: crashed.pid, workspaceId: "ws-a" }, "https://c2c-a.example.com");
-      void holder;
+      void holder; // never released — simulates a crash while holding the claim
       crashed.kill();
       const deadline = Date.now() + 5000;
       while (pidAlive(crashed.pid) && Date.now() < deadline) await sleep(50);
       expect(pidAlive(crashed.pid)).toBe(false);
-      // A dead holder must NOT be auto-reclaimed: two recovering starters
-      // could otherwise race over the same generation. Fail closed instead.
-      expect(() =>
-        acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-b" }, "https://c2c-b.example.com")
-      ).toThrow(/no longer running/);
-      // Manual remediation (deleting the stale generation) unblocks the claim.
-      fs.rmSync(lockFileFor(stateDir, "my-laptop"));
+
+      // Crash residue must NOT block recovery: the new starter reclaims the
+      // dead generation and proceeds (found blocking a real doctor gate).
       const reclaimed = acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-b" }, "https://c2c-b.example.com");
+
+      // While ws-b holds it live, a third starter still fails closed.
+      expect(() =>
+        acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-c" }, "https://c2c-c.example.com")
+      ).toThrow(/currently served by.*ws-b/s);
+
+      // No reclaim temp residue is left behind.
+      const dir = path.join(stateDir, "runtime", "tunnels");
+      expect(fs.readdirSync(dir).filter((f) => f.includes(".reclaim"))).toEqual([]);
+
       reclaimed.release();
+      const after = acquireTunnelOwnership("my-laptop", { pid: process.pid, workspaceId: "ws-d" }, "https://c2c-d.example.com");
+      after.release();
     } finally {
       cleanup(path.join(stateDir, "runtime", "tunnels"));
     }

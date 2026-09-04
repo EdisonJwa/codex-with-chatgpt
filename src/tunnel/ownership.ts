@@ -15,11 +15,15 @@ import { ensureDir, getStateDir } from "../config/paths.js";
  * carries the owning bridge's pid and workspace, so a conflicting start
  * fails with an actionable message.
  *
- * Fail-closed: an existing claim file is NEVER removed automatically — not
- * for a live holder, and not for a holder whose pid looks dead. A dead-pid
- * reclaim race between two recovering starters could let one delete the
- * other's freshly created generation, so a stale claim instead blocks
- * startup with an actionable manual remediation (one file deletion).
+ * A claim whose holder pid is DEAD (crash residue) is reclaimed atomically:
+ * the contender first RENAMES the stale lock to a private temp name — rename
+ * is exclusive, so exactly one contender wins the right to replace that
+ * generation — and then creates its own with openSync("wx"). A loser's
+ * rename fails (ENOENT) and it re-reads, now seeing the winner's LIVE
+ * generation, and fails closed. No unconditional delete of the live lock
+ * file ever happens, so the two-recovering-starters race cannot produce two
+ * connectors for one hostname. Unreadable lock content still fails closed:
+ * state unknown means do not touch.
  */
 export interface TunnelOwner {
   pid: number;
@@ -85,10 +89,10 @@ function removeIfGeneration(file: string, identity: string): void {
 }
 
 /**
- * Claim exclusive connector rights for `hostname` on this machine. Any
- * existing claim — live holder, dead holder, or unreadable file — fails
- * closed with an actionable error; releasing a claim is always allowed for
- * its own generation.
+ * Claim exclusive connector rights for `hostname` on this machine. A LIVE
+ * holder (or unreadable lock) fails closed with an actionable error; a DEAD
+ * holder is reclaimed atomically (see the module docstring). Releasing a
+ * claim is always allowed for its own generation.
  */
 export function acquireTunnelOwnership(
   target: string,
@@ -96,59 +100,93 @@ export function acquireTunnelOwnership(
   publicUrl: string
 ): TunnelClaim {
   const file = lockFile(target);
-  const identity = randomBytes(12).toString("hex");
-  let fd: number;
-  try {
-    fd = fs.openSync(file, "wx");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const holder = readHolder(file);
-    if (holder === "unreadable") {
-      throw new Error(
-        `The tunnel ownership record for ${target} exists but cannot be read ` +
-          `(${file}). If no bridge is running, remove that file and retry.`
-      );
-    }
-    // ANY live holder pid is a live claim — including our own pid, which
-    // means this process already holds the claim and must not fall through
-    // to the stale-branch message below.
-    if (holder && (holder.pid === owner.pid || pidAlive(holder.pid))) {
-      throw new Error(
-        `The fixed address ${publicUrl} is currently served by ` +
-          `workspace ${holder.workspaceId} (pid ${holder.pid}). Only one bridge may ` +
-          `connect a hostname at a time — stop that workspace's bridge first ` +
-          `(\`c2c stop\` in that workspace), then retry.`
-      );
-    }
-    throw new Error(
-      holder
-        ? `The tunnel ownership record for ${target} names holder workspace ` +
-          `${holder.workspaceId} (pid ${holder.pid}), which is no longer running. ` +
-          `Remove the stale record ${file} and retry.`
-        : `The tunnel ownership record for ${target} is unavailable (${file}). ` +
-          `If no bridge is running, remove that file and retry.`
-    );
-  }
-  const content: LockContent = {
-    pid: owner.pid,
-    workspaceId: owner.workspaceId,
-    publicUrl,
-    target,
-    identity,
-    startedAt: new Date().toISOString(),
-  };
-  try {
-    fs.writeFileSync(fd, JSON.stringify(content));
-  } catch (writeError) {
+  // Bounded retry loop: a reclaim loser re-reads and converges on the
+  // winner's LIVE generation within one or two passes; the cap turns
+  // pathological contention into an explicit error instead of a spin.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const identity = randomBytes(12).toString("hex");
+    let fd: number;
+    let reclaimedTemp: string | null = null;
     try {
-      fs.closeSync(fd);
-    } catch {
-      // ignore
+      fd = fs.openSync(file, "wx");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const holder = readHolder(file);
+      if (holder === "unreadable") {
+        throw new Error(
+          `The tunnel ownership record for ${target} exists but cannot be read ` +
+            `(${file}). If no bridge is running, remove that file and retry.`
+        );
+      }
+      // ANY live holder pid is a live claim — including our own pid, which
+      // means this process already holds the claim and must not fall through
+      // to the reclaim path below.
+      if (holder && (holder.pid === owner.pid || pidAlive(holder.pid))) {
+        throw new Error(
+          `The fixed address ${publicUrl} is currently served by ` +
+            `workspace ${holder.workspaceId} (pid ${holder.pid}). Only one bridge may ` +
+            `connect a hostname at a time — stop that workspace's bridge first ` +
+            `(\`c2c stop\` in that workspace), then retry.`
+        );
+      }
+      if (!holder) {
+        // File vanished between EEXIST and read (a concurrent release or
+        // reclaim): retry the plain create.
+        continue;
+      }
+      // Stale holder (crash residue): reclaim atomically. Losing the rename
+      // means another contender won — re-read and converge on its decision.
+      reclaimedTemp = `${file}.${identity}.reclaim`;
+      try {
+        fs.renameSync(file, reclaimedTemp);
+      } catch {
+        continue;
+      }
+      try {
+        fd = fs.openSync(file, "wx");
+      } catch (createError) {
+        try {
+          fs.rmSync(reclaimedTemp, { force: true });
+        } catch {
+          // ignore — orphan temp files are harmless
+        }
+        if ((createError as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw createError;
+      }
     }
-    throw writeError;
+    const content: LockContent = {
+      pid: owner.pid,
+      workspaceId: owner.workspaceId,
+      publicUrl,
+      target,
+      identity,
+      startedAt: new Date().toISOString(),
+    };
+    try {
+      fs.writeFileSync(fd, JSON.stringify(content));
+    } catch (writeError) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore
+      }
+      throw writeError;
+    }
+    if (reclaimedTemp) {
+      // The stale generation we won the right to remove — best effort.
+      try {
+        fs.rmSync(reclaimedTemp, { force: true });
+      } catch {
+        // ignore — orphan temp files are harmless
+      }
+    }
+    return {
+      identity,
+      release: (): void => removeIfGeneration(file, identity),
+    };
   }
-  return {
-    identity,
-    release: (): void => removeIfGeneration(file, identity),
-  };
+  throw new Error(
+    `The tunnel ownership record for ${target} could not be settled after ` +
+      `repeated attempts (${file}). If no bridge is running, remove that file and retry.`
+  );
 }

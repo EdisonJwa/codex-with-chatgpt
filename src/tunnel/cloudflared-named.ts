@@ -4,6 +4,7 @@ import readline from "node:readline";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { findBinary } from "./detect.js";
+import { verifyTunnelServesHost } from "./cloudflared.js";
 import { acquireTunnelOwnership, type TunnelClaim, type TunnelOwner } from "./ownership.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provider.js";
 
@@ -27,6 +28,13 @@ export interface CloudflaredNamedTunnelOptions {
   startTimeoutMs?: number;
   /** Test seam: override the child_process spawn call. */
   spawnOverride?: typeof spawn;
+  /**
+   * Fail-closed verification (same as the Quick tunnel): start() resolves
+   * only after the public URL serves THIS host's /health. Test seam: inject
+   * a fake fetch. Default window is 20s inside the overall start timeout.
+   */
+  fetchImpl?: typeof fetch;
+  verifyTimeoutMs?: number;
   /**
    * Who is starting this tunnel (the bridge process). Identifies the claimant
    * for the machine-wide ownership claim; direct constructions default to the
@@ -72,6 +80,8 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   private readonly binaryOverride?: string;
   private readonly startTimeoutMs: number;
   private readonly spawnOverride?: typeof spawn;
+  private readonly fetchImpl: typeof fetch;
+  private readonly verifyTimeoutMs: number;
   private readonly owner: TunnelOwner;
   private child: ChildProcess | null = null;
   private connected = false;
@@ -95,6 +105,8 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     this.binaryOverride = opts.binaryOverride;
     this.startTimeoutMs = opts.startTimeoutMs ?? 45_000;
     this.spawnOverride = opts.spawnOverride;
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.verifyTimeoutMs = opts.verifyTimeoutMs ?? 20_000;
     this.owner = opts.owner ?? { pid: process.pid, workspaceId: "unknown" };
   }
 
@@ -166,8 +178,26 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
           if (CONNECTED_RE.test(line) && !this.connected) {
             this.connected = true;
             const url = this.publicUrl();
-            this.logger.info(`Named tunnel established: ${url}`);
-            finish(() => resolve(url));
+            // Fail-closed (same as Quick): "registered" is cloudflared's
+            // view — the edge can still lag behind. Resolve only when the
+            // public URL serves THIS host's /health.
+            this.logger.info(`Named tunnel connection registered; verifying ${url} reaches this host...`);
+            void verifyTunnelServesHost(url, {
+              timeoutMs: this.verifyTimeoutMs,
+              fetchImpl: this.fetchImpl,
+            }).then((verified) => {
+              if (settled) return;
+              if (verified) {
+                this.logger.info(`Named tunnel established: ${url}`);
+                finish(() => resolve(url));
+              } else {
+                const message = `Public URL ${url} never reached this host's /health`;
+                this.lastError = message;
+                this.logger.error(message);
+                child.kill("SIGTERM");
+                finish(() => reject(new Error(message)));
+              }
+            });
           }
           if (/\b(error|failed|fatal)\b/i.test(line)) {
             this.lastError = line.slice(0, 400);
