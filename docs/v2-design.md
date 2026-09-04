@@ -51,11 +51,12 @@ multiple agents/identities share ONE canonical MCP endpoint.
   shutdown; after socket close begins, no new registrations (CLI retries
   against the next host).
 
-## 3. Storage (4 layers)
+## 3. Storage (5 layers)
 
 Keep: `auth/<ws>.json` (schema-versioned), `executions/<ws>.jsonl`
-(+`tool` field), `tunnel.json` (machine), `host.json`. Drop:
-`runtime/<ws>.json`, `endpoints/`, `sessions/`, `tunnels/<ws>.json`,
+(+`tool` field), `tunnel.json` (machine), `host.json`, `sessions/<ws>.json`
+(session URL — user decision 2026-09-04, see §15). Drop:
+`runtime/<ws>.json`, `endpoints/`, `tunnels/<ws>.json`,
 `runtime/tunnels/*.lock`. Logs are operational, not state.
 
 - Quick-mode connector rebinding: store pairing-generation metadata on
@@ -132,20 +133,24 @@ Keep: `auth/<ws>.json` (schema-versioned), `executions/<ws>.jsonl`
 Split AFTER the host API is stable: `src/cli/index.ts` (program only) +
 `src/cli/{context.ts, http.ts, commands/*.ts}`. Stable JSON error codes
 separate from English human strings. One `/admin/info` per stable host
-generation (refetch after any reload/restart). Delete `c2c session`,
-`c2c workspace`, endpoint helpers, per-workspace tunnel choice, and the
-AdminInfo twin only after replacements are exercised by tests.
+generation (refetch after any reload/restart). Delete `c2c workspace`,
+endpoint helpers, per-workspace tunnel choice, and the AdminInfo twin only
+after replacements are exercised by tests. `c2c session` is REINSTATED
+(2026-09-04, §15): show/set the workspace's saved ChatGPT conversation URL.
 
 ## 9. SKILL.md
 
-English-only, 443 → ~220-270 lines. Remove: per-workspace tunnel choice,
-Cloudflare provisioning/login flow, session URL persistence,
-endpoint-reclaim bookkeeping, legacy namedRepair paths, legacy connector
-naming. Keep: golden safety rules, one-IAB-tab rule, personalized
-Temporary Chat setup, doctor gate, INIT→PLAN→EXECUTED→review loop,
-record continuity, HANDOFF, small recovery map. Document: Quick mode may
-require connector recreation on new host generation; Named machine mode
-never should.
+Status: DONE (2026-09-04) — 443 → 320 lines, English-only instructions
+(user-facing quoted strings stay Chinese by design), zero V1 references:
+per-workspace tunnel choice, Cloudflare provisioning/login flow,
+endpoint-reclaim bookkeeping, legacy namedRepair/chatgptRepair fields all
+removed. Kept: golden safety rules, one-IAB-tab rule, workspace-chat
+session flow (§15), doctor gate (V2 report fields incl. capabilities),
+INIT→PLAN→EXECUTED→review loop, record continuity, HANDOFF, small recovery
+map. Added: `c2c selftest` as the public-path gate after connector repair,
+`c2c session` pointer updates, 8-hex task ids, record `--slug`. The two
+protocol message templates stay inline in the skill to avoid format
+drift — that is why it lands slightly above the original 270 estimate.
 
 ## 10. Implementation order
 
@@ -184,8 +189,9 @@ Do not mix the host cutover with the CLI rewrite in one commit.
   sensitive renames never surface via MCP or git_status; 1 MB cap → 413;
   corrupt host/auth/tunnel state is explicit, never default-empty;
   records from two tools stay separable via `tool`.
-- Real ChatGPT acceptance: personalized Temporary Chat per session with
-  connector, no saved URL (carried over from V1 acceptance).
+- Real ChatGPT acceptance: the workspace's persistent chat with connector,
+  URL saved via `c2c session set` only after the workspace_info check, and
+  a later session resuming the SAME conversation (revised 2026-09-04, §15).
 
 ## 12. Relation to steipete/oracle (`askoracle.sh`)
 
@@ -198,8 +204,8 @@ Comparison with C2C:
 - Context model: oracle PUSHES selected files into the prompt; C2C lets the
   model PULL workspace data itself via read-only MCP (no pasting, agent-
   driven exploration, live diff/test reads).
-- State: oracle keeps per-run sessions; C2C uses personalized Temporary
-  Chats + local execution records for continuity.
+- State: oracle keeps per-run sessions; C2C uses one persistent workspace
+  chat (saved session URL, §15) plus local execution records for continuity.
 - Auth: oracle uses API keys or a signed-in browser session (bridge mode =
   SSH reverse tunnel + bearer token + capability-advertising /health —
   patterns that independently validate our loopback + admin-token design);
@@ -209,3 +215,124 @@ Comparison with C2C:
   inside the review loop (via oracle-mcp or `oracle -p ... --file` in the
   skill's review step) without changing the V2 architecture. Not a
   dependency; revisit if the user wants oracle-based review as default.
+
+## 13. Adopted inspirations from steipete/oracle (post-review additions)
+
+Status: IMPLEMENTED on `refactor/v2` (records retention, audit ledger +
+resource, execution-record resource, `/admin/info` capabilities + doctor
+drift check, `c2c selftest`, `record --slug`, env-gated live test +
+`tests/live/lock.ts`, `docs/windows.md`). Remaining follow-up: consume
+capabilities/selftest from the skill (lands with the §9 skill pass).
+
+ADDITIVE ONLY — does not amend the reviewed sections above. Each item
+names the oracle pattern it borrows and the implementation step (§10)
+where it lands.
+
+1. **Execution record retention/pruning** (oracle `sessionStore.prune`):
+   `executions/<ws>.jsonl` is append-only and currently grows forever;
+   prune on host start (age or count cap) using the same atomic-write
+   discipline as §3. Step 5 (storage cut).
+2. **Execution records as MCP resources** (oracle
+   `oracle-session://{id}/{metadata|log|request}`): register a
+   workspace-scoped resource template such as
+   `c2c://execution/{id}/record` alongside `execution_summary`, so
+   ChatGPT can pull one full record when a summary is not enough. Same
+   sensitive filtering and workspace scoping as tools. Steps 3/6.
+3. **Per-identity read audit** (inspired by oracle `--files-report` /
+   token stats, mapped to the PULL side): lightweight ledger of which
+   agent identity (clientId) read which paths/tools and when, persisted
+   with execution records and surfaced via `execution_summary` /
+   `c2c logs`. Accountability for the §1 multi-identity endpoint. Step 6.
+4. **Env-gated live acceptance tests + serialization lock** (oracle
+   `tests/live/*` + `liveLock.ts`): `C2C_LIVE=1` suite drives real
+   pairing → tool call → tunnel rotation against real ChatGPT, serialized
+   so live runs never overlap. Makes §11 "real ChatGPT acceptance"
+   repeatable instead of a one-off ritual. Step 7.
+5. **`c2c selftest`** (oracle `--dry-run`): in-process MCP client through
+   the REAL public URL with a throwaway token, exercising
+   tunnel → OAuth → tool → sanitized output end-to-end; formalizes the
+   setup "file read test" as a doctor-verifiable check after tunnel
+   reloads or host migration. Steps 2/6 (doctor).
+6. **Version/capability advertising on `/admin/info`** (oracle
+   capability-advertising `/health`): advertise tool list + schema/skill
+   version so the skill's doctor gate detects skill/server drift (the
+   skill self-updates daily, so drift is a ROUTINE state) and rebuilds.
+   Extends §2 `host.json` / §8 CLI. Step 2.
+7. **Optional human-readable slug on ExecutionRecord** (oracle `consult`
+   `slug`): alongside the 8-12 hex task IDs of §7, an optional short slug
+   for human- and ChatGPT-friendly references in conversation and
+   `c2c logs`. Step 6.
+8. **Windows platform-quirks doc** (oracle `docs/windows-work.md`): one
+   page covering win32 quirks in process lifecycle, tunnels, and file
+   locking — the areas V2 touches most and where C2C development
+   actually runs. Step 7 (docs).
+
+Explicitly NOT adopted (guardrails):
+
+- `--render`/manual-paste fallback: reintroduces repo upload into a
+  prompt — the exact thing C2C exists to prevent.
+- Cookie-based browser automation of ChatGPT: C2C stays on the official
+  connector + OAuth; cookie scraping is oracle's biggest fragility.
+- Full transcripts on disk: oracle stores complete request/response
+  logs; C2C's tiny control-plane records are a privacy feature.
+- Multi-model panels / TUI / notifier: that is oracle's job as the
+  optional external reviewer per §12, not C2C's.
+
+## 14. Upstream sync review (XiaoDuoYa/codex-with-chatgpt, 2026-09-04)
+
+21 upstream commits since the fork (`6395334`..`a9f91cd`). Reviewed for
+V2 reuse; disposition:
+
+ADOPTED (implemented):
+
+- Quick-tunnel fail-closed startup (#92): reject cloudflared's
+  `api.trycloudflare.com` as a URL; `start()` resolves only after the
+  public `/health` identifies `SERVICE_NAME`; `C2C_CLOUDFLARED_PATH`
+  env override in `findBinary`. Tests in tunnel.test.ts.
+- Structured output schemas (#238 + #322): every MCP tool declares a
+  zod `outputSchema` (`MCP_TOOL_OUTPUT_SCHEMAS`) and returns
+  `structuredContent`; the SDK rejects schema drift at runtime. #322's
+  lesson (validate sources) is built in.
+- Auth-page hardening remainder from #26: CSP gains
+  `base-uri 'none'; frame-ancestors 'none'` + `X-Frame-Options: DENY`.
+
+ALREADY COVERED IN V2 (no change): `windowsHide` on all spawns (quick,
+named, host daemon); https OAuth callback URIs; pairing-page escaping /
+no-store / CSP baseline.
+
+NOT PORTED — inputs for the §9 skill pass or a future design round:
+
+- Sanitized command-output feature (#44/#322-era: `execution_output`
+  tool, key/token/home-path sanitizer, 64KB caps). Good patterns; but it
+  adds a 9th tool and changes the public surface — needs its own review
+  against §4 before adoption.
+- Upstream's session persistence direction (session URLs, ChatGPT
+  Project collections, `waitingFor` checkpoint machine) CONFLICTS with
+  the V2 decision: personalized Temporary Chats + local records only
+  (§9). Revisit only if Temporary Chat continuity proves insufficient.
+- `d6d0dd4` inconclusive-probe fix: V1-era daemon probing; V2's strict
+  `findLiveHost` + PortInUseError + register-with-winner covers it.
+
+## 15. User decision: session URL persistence (2026-09-04)
+
+USER DECISION ("use session url") — REVERSES the V2 "Temporary Chats only,
+never persist a URL" stance (previously §9; upstream made the same move
+with its session/project work, see §14).
+
+- Each workspace keeps ONE persistent ChatGPT conversation. Its URL is
+  saved locally as `sessions/<ws>.json` (storage: back to 5 layers, §3)
+  and reopened by later Codex sessions — conversation context survives
+  restarts, which Temporary Chats could never provide.
+- Privacy trade-off, accepted: the workspace chat appears in the ChatGPT
+  history of the logged-in account (Temporary Chats did not). The
+  read-only/no-upload guarantees are unchanged — repo content still flows
+  only through the MCP data plane.
+- Guards carried over from upstream practice: save the URL ONLY after the
+  workspace_info smoke gate passed in that chat; URL validation accepts
+  only `https://chatgpt.com/c/<id>` shapes (never start/settings/plugin
+  pages or foreign hosts); `--clear` starts over; execution records remain
+  the source of truth for task continuity (HANDOFF), the saved URL is the
+  convenience path.
+- Implementation: `src/session/state.ts` (lenient read — corrupt file
+  means "no session"; atomic write), `c2c session {show,set}` (CLI §8),
+  skill rewired to resume-by-default / save-after-verification.

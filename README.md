@@ -190,18 +190,21 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 76 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # vitest (live tunnel test gated behind C2C_LIVE=1)
 
 c2c setup           # bridge + tunnel + pairing code, all in one
+c2c selftest        # end-to-end test of the connector path (tunnel -> OAuth -> MCP reads)
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
 c2c status / doctor / pair / unpair / logs / stop
+c2c logs --audit    # which connector read what, and when
 ```
 
 Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 (auto-detected; the Skill installs it for you).
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
-[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)
+[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·
+[windows notes](docs/windows.md)
 
 ## Project layout
 

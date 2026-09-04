@@ -124,14 +124,15 @@ NEEDS:
 ...
 ```
 
-### HANDOFF (Codex → replacement Temporary Chat)
+### HANDOFF (Codex → replacement chat)
 
-C2C conversations are Temporary Chats (one per Codex session); no conversation
-URL is persisted. A HANDOFF is sent only when a NON-terminal task must continue
-in a replacement chat (the previous temp chat was lost, closed, or visibly
-lagging). Right after the boot prompt, Codex sends a HANDOFF so the new chat
-can continue seamlessly — a brief, never a data dump (the new chat re-reads
-code via MCP), reconstructed from the local execution records
+Each workspace keeps ONE persistent ChatGPT conversation whose URL is saved
+locally (`c2c session show`) and reopened by later Codex sessions. A HANDOFF
+is sent only when a NON-terminal task must continue in a replacement chat
+(the saved conversation was deleted, or is visibly stuck). Right after the
+boot prompt, Codex sends a HANDOFF so the new chat can continue seamlessly —
+a brief, never a data dump (the new chat re-reads code via MCP),
+reconstructed from the local execution records
 (`goal`, per-iteration progress, `state`, `summary`, `nextExpectedStep`).
 Pull a sufficient limit (e.g. 50 records) and filter to the current
 `taskId` so the original INIT goal is not lost after several iterations:
